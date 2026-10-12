@@ -16,17 +16,21 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 COMPOSE=""
+CONTAINER_ENGINE=""
 if command -v podman-compose >/dev/null 2>&1; then
   COMPOSE="podman-compose"
+  CONTAINER_ENGINE="podman"
 elif docker compose version >/dev/null 2>&1; then
   COMPOSE="docker compose"
+  CONTAINER_ENGINE="docker"
 elif command -v docker-compose >/dev/null 2>&1; then
   COMPOSE="docker-compose"
+  CONTAINER_ENGINE="docker"
 else
   echo "error: no compose implementation found (podman-compose or docker compose)" >&2
   exit 1
 fi
-echo "==> using: $COMPOSE"
+echo "==> using: $COMPOSE (engine: $CONTAINER_ENGINE)"
 
 PROFILE_FLAGS=()
 APP_SERVICES=(app)
@@ -64,17 +68,23 @@ trap cleanup EXIT INT TERM
 echo "==> bringing the stack up"
 $COMPOSE "${PROFILE_FLAGS[@]}" up -d --build postgres keycloak localstack "${APP_SERVICES[@]}"
 
-# ── 2. Wait for REAL health, not just "container started" ──────────────────
-# podman-compose has no `--wait`, so poll the container health probes that the
-# compose file already defines. A container without a healthcheck is treated as
-# ready once it is running.
+# ── 2. Wait for REAL health, not just "container started" ─────────────────
+# Neither `podman-compose` nor older `docker-compose` supports `--wait`, so poll
+# the container health probes the compose file already defines. A container
+# without a healthcheck is treated as ready once it is running.
 #
-# Container names are compose-generated ("wallet_postgres_1"), which is not
-# guaranteed across versions, so resolve the container by its compose service
-# label first and fall back to the conventional name.
+# Container names are compose-generated ("wallet_postgres_1") and not
+# guaranteed across versions or engines, so resolve the container by its
+# compose service label first and fall back to the conventional name.
+#
+# Both engines are supported because the same script must run locally (podman)
+# and in GitHub Actions (docker).
+ENGINE=(podman)
+[ "$CONTAINER_ENGINE" = "docker" ] && ENGINE=(docker)
+
 resolve_container() {
   local service="$1" name
-  name="$(podman ps --filter "label=com.docker.compose.service=$service" --format '{{.Names}}' 2>/dev/null | head -n1)"
+  name="$("${ENGINE[@]}" ps --filter "label=com.docker.compose.service=$service" --format '{{.Names}}' 2>/dev/null | head -n1)"
   [ -n "$name" ] || name="wallet_${service}_1"
   printf '%s' "$name"
 }
@@ -84,7 +94,7 @@ wait_healthy() {
   name="$(resolve_container "$service")"
   printf '==> waiting for %s (%s)' "$service" "$name"
   while [ "$waited" -lt "$timeout" ]; do
-    status="$(podman inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$name" 2>/dev/null || echo missing)"
+    status="$("${ENGINE[@]}" inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$name" 2>/dev/null || echo missing)"
     case "$status" in
       healthy|running) echo " … $status ($waited s)"; return 0 ;;
       missing)         echo " … container not found" >&2; return 1 ;;

@@ -1,0 +1,189 @@
+name: CI
+
+# Two jobs with different cost profiles:
+#   quality — fast, hermetic, no containers. Runs on every push and PR.
+#   e2e     — the real stack (Postgres + Keycloak + LocalStack) through the
+#             same docker compose the README documents. This is the job that
+#             proves the challenge's claims instead of asserting them.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A new push to the same ref cancels the previous run: CI minutes are a
+# resource, and a superseded run's result is worthless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.26"
+  # Compose project name, so the job can address containers deterministically.
+  COMPOSE_PROJECT_NAME: wallet
+
+jobs:
+  # ── Fast feedback: formatting, vet, unit tests, race detector ──────────────
+  quality:
+    name: quality (fmt · vet · unit · race)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Show the toolchain and the declared Go version
+        # go.mod says 1.26.0 and the Dockerfile pins golang:1.26. Printing both
+        # next to the runner's toolchain makes a drift visible in the log; the
+        # hard check is that the runner satisfies go.mod, which `go build`
+        # enforces on its own.
+        run: |
+          echo "runner:  $(go version)"
+          echo "go.mod:  $(grep -E '^go ' go.mod)"
+          echo "image:   $(grep -m1 '^FROM golang' Dockerfile)"
+
+      - name: gofmt
+        # Fails the build on any unformatted file, listing the offenders.
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go vet (integration tag)
+        # The integration files are behind a build tag; vet must see them too,
+        # otherwise a compile error there only surfaces in the e2e job.
+        run: go vet -tags=integration ./...
+
+      - name: Unit tests (with race detector)
+        run: go test -race -count=1 ./...
+
+      - name: Coverage
+        # Reported, not gated: a coverage threshold on a challenge repo turns
+        # into gaming the number. The artifact is here so a reviewer can see it.
+        run: |
+          go test -count=1 -covermode=atomic -coverprofile=coverage.out ./...
+          go tool cover -func=coverage.out | tail -1
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+          retention-days: 7
+
+  # ── The real thing: docker compose + the integration suite ─────────────────
+  e2e:
+    name: e2e (compose · integration · race)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Show the stack that will be exercised
+        run: docker compose version && docker --version
+
+      # scripts/e2e.sh uses `docker compose` when podman-compose is absent,
+      # which is exactly the ubuntu-latest case. The same script the README
+      # documents for local runs is what CI runs — no parallel CI-only path
+      # that could drift from the documented one.
+      - name: Bring the stack up, run the suite, tear down
+        run: ./scripts/e2e.sh
+
+      - name: Logs from every service (on failure)
+        if: failure()
+        run: docker compose logs --no-color --tail=200
+
+      - name: Container state (on failure)
+        if: failure()
+        run: docker compose ps
+
+  # ── The split topology: WALLET_MODE=api + WALLET_MODE=workers ──────────────
+  e2e-split:
+    name: e2e split (api + workers)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Two-role topology end-to-end
+        # Same image, two processes. If this passes, the claim in the README
+        # ("api answers traffic while a separate workers process drains the
+        # queue") is verified on every push, not just argued.
+        run: SPLIT=1 ./scripts/e2e.sh
+
+      - name: Logs from both roles (on failure)
+        if: failure()
+        run: |
+          docker compose --profile split logs --no-color --tail=200
+
+  # ── Build the deployable image and smoke-test the binary ───────────────────
+  image:
+    name: image (build · non-root · probes)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the production image
+        run: docker build -t wallet:ci .
+
+      - name: The image runs as a non-root user
+        # Security invariant worth enforcing mechanically: the Dockerfile has
+        # USER app, and a regression that drops it fails here.
+        run: |
+          uid="$(docker run --rm --entrypoint id wallet:ci -u)"
+          echo "container uid: $uid"
+          [ "$uid" != "0" ] || { echo "::error::image runs as root"; exit 1; }
+
+      - name: migrate subcommand is dependency-free
+        # `walletd version` must not need a DB or any config: it parses args
+        # before building the Fx graph, which is what makes the binary usable
+        # as an ops/health probe from a bare container.
+        run: docker run --rm --entrypoint walletd wallet:ci version
+
+      - name: The binary refuses to start with invalid configuration
+        # Fail-fast is a feature: a bad WALLET_MODE must stop the process at
+        # config load, not degrade into an unintended topology.
+        #
+        # Note: this runs the app WITHOUT a subcommand on purpose. `walletd
+        # version` returns before config is read, so testing it would prove
+        # nothing; the full boot path is where validation lives. The other
+        # variables point at unreachable addresses — config validation runs
+        # before any connection is attempted, so the failure is the mode.
+        run: |
+          set +e
+          docker run --rm \
+            -e WALLET_MODE=banana \
+            -e WALLET_DB_DSN='postgres://x:x@127.0.0.1:1/x' \
+            -e WALLET_AUTH_ISSUER='http://127.0.0.1:1/realms/x' \
+            -e WALLET_SQS_ENDPOINT='http://127.0.0.1:1' \
+            --entrypoint walletd wallet:ci >/tmp/out 2>&1
+          status=$?
+          set -e
+          echo "exit=$status"
+          cat /tmp/out
+          [ "$status" -ne 0 ] || { echo "::error::invalid WALLET_MODE was accepted"; exit 1; }
+          grep -q 'WALLET_MODE must be all|api|workers' /tmp/out \
+            || { echo "::error::unexpected error message"; exit 1; }
+          echo "rejected with the expected message"

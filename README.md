@@ -15,8 +15,10 @@ transactional outbox, inbox durável e controle de concorrência por carteira.
 [![OpenTelemetry](https://img.shields.io/badge/OpenTelemetry-traces-425CC7?logo=opentelemetry&logoColor=white)](https://opentelemetry.io)
 [![Docker](https://img.shields.io/badge/containers-podman%20%7C%20docker-2496ED?logo=docker&logoColor=white)](https://podman.io)
 
+[![CI](https://github.com/chalkan3/backend-challenge-go/actions/workflows/ci.yml/badge.svg)](https://github.com/chalkan3/backend-challenge-go/actions/workflows/ci.yml)
+[![Release](https://github.com/chalkan3/backend-challenge-go/actions/workflows/release.yml/badge.svg)](https://github.com/chalkan3/backend-challenge-go/actions/workflows/release.yml)
 [![Testes unitários](https://img.shields.io/badge/unit%20tests-71%20passing-2ea043)](#-testes)
-[![Testes e2e](https://img.shields.io/badge/e2e%20tests-24%20passing-2ea043)](#-testes)
+[![Testes e2e](https://img.shields.io/badge/e2e%20tests-25%20passing-2ea043)](#-testes)
 [![Go Report Card](https://goreportcard.com/badge/github.com/chalkan3/backend-challenge-go)](https://goreportcard.com/report/github.com/chalkan3/backend-challenge-go)
 
 </div>
@@ -35,6 +37,7 @@ transactional outbox, inbox durável e controle de concorrência por carteira.
 - [Observabilidade](#-observabilidade)
 - [API](#-api)
 - [Testes](#-testes)
+- [Integração contínua](#-integração-contínua)
 - [Simulações de falha](#-simulações-de-falha)
 - [Decisões técnicas](#-decisões-técnicas)
 
@@ -575,6 +578,55 @@ ponta como um operador o narraria, verificando o saldo a cada passo:
 | `TestJourneyFullPlayerLifecycle` | abrir 100.00 → BET 30.00 → WIN 12.50 → ROLLBACK do BET → saldo **112.50**, ledger com 4 lançamentos, reconciliação consistente e evento `WagerTransactionProcessed` na fila |
 | `TestJourneyHTTPContractIsHonest` | cada rota documentada responde o code esperado (pega divergência entre README e código) |
 | `TestJourneyHealthAndMetricsArePublic` | `/health/*` e `/metrics` são públicos; rota de negócio sem token → `401` |
+
+---
+
+## 🔁 Integração contínua
+
+O repo tem dois workflows em [`.github/workflows/`](.github/workflows). O
+princípio é que **o CI roda exatamente o que o README manda um humano rodar** —
+não existe um caminho só-de-CI que possa divergir da documentação.
+
+### `ci.yml` — qualidade e as duas topologias
+
+| Job | O que roda | Por que existe |
+| :-- | :-- | :-- |
+| `quality` | `gofmt -l`, `go vet` (com e sem `-tags=integration`), `go test -race ./...`, coverage como artefato | Feedback rápido e hermético, sem containers. O `vet` com tag pega erro de compilação nos testes de integração **antes** do job caro |
+| `e2e` | `./scripts/e2e.sh` — compose real (Postgres + Keycloak + LocalStack) + suíte completa | É o job que **prova** as afirmações do desafio em vez de afirmá-las; 25 testes com race detector |
+| `e2e-split` | `SPLIT=1 ./scripts/e2e.sh` | Exercita `WALLET_MODE=api` + `WALLET_MODE=workers` como processos separados — se passar, o argumento de topologia do README está verificado a cada push |
+| `image` | build da imagem, uid ≠ 0, `walletd version`, boot com `WALLET_MODE` inválido | Invariantes de segurança e de operação viram **falha de build**, não comentário de revisão |
+
+O job `image` verifica três coisas que costumam ser só prometidas:
+
+- a imagem roda como **não-root** (`uid 10001`), então remover o `USER app` quebra o CI;
+- `walletd version` funciona **sem banco e sem config** (é um probe de ops);
+- o processo **recusa subir** com `WALLET_MODE=banana`, e a mensagem cita a
+  variável — fail-fast é testado no caminho real de boot (sem subcomando,
+  onde o `config.Load` roda), não num atalho que passaria por acidente.
+
+> [!NOTE]
+> Cada push novo na mesma ref **cancela** a execução anterior
+> (`concurrency.cancel-in-progress`): resultado de um run superado não tem
+> valor, e minutos de CI são recurso.
+
+### `release.yml` — imagem e release
+
+Disparado por tag semver (`v1.2.3`) ou manualmente. Publica no GHCR uma imagem
+**multi-arquitetura** (`linux/amd64` + `linux/arm64`), com SBOM e provenance, e
+cria o GitHub Release com as instruções dos modos `api`/`workers`.
+
+```sh
+git tag v1.0.0 && git push origin v1.0.0
+```
+
+### Rodando o que o CI roda, na sua máquina
+
+```sh
+gofmt -l . && go vet ./... && go vet -tags=integration ./...   # job quality
+go test -race -count=1 ./...
+make e2e          # job e2e
+make e2e SPLIT=1  # job e2e-split
+```
 
 ---
 

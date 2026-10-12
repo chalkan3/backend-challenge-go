@@ -1,0 +1,106 @@
+name: Release
+
+# Publishes a multi-stage-enabled image to GHCR and cuts a GitHub Release.
+#
+# Trigger: pushing a semver tag (v1.2.3) or running it manually. Nothing here
+# runs on `main` pushes — releases are deliberate acts, not side effects of a
+# merge.
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v1.0.0)"
+        required: true
+
+permissions:
+  contents: write   # create the GitHub Release
+  packages: write   # push to GHCR
+
+env:
+  GO_VERSION: "1.26"
+  REGISTRY: ghcr.io
+
+jobs:
+  # The image is built for two architectures. Building arm64 on an amd64
+  # runner uses QEMU, which is slow but honest: the same Dockerfile must
+  # produce the same binary on both, and a CGO_ENABLED=0 static build is what
+  # makes that possible.
+  publish:
+    name: publish image (amd64 + arm64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve the tag
+        id: tag
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "releasing $tag"
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: OCI metadata (tags + labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ steps.tag.outputs.tag }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Extract the sbom for the amd64 image
+        # An SBOM is the cheap, standard answer to "what is actually inside the
+        # image you shipped?" — useful to a reviewer and to any supply-chain
+        # check later.
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ github.repository }}:sbom-${{ steps.tag.outputs.tag }}
+          sbom: true
+          provenance: true
+          cache-from: type=gha
+
+      - name: GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          generate_release_notes: true
+          body: |
+            Container image:
+
+            ```
+            docker pull ${{ env.REGISTRY }}/${{ github.repository }}:${{ steps.tag.outputs.tag }}
+            ```
+
+            Run it in any of the three modes (see the README):
+
+            ```
+            docker run --rm -e WALLET_MODE=api      ${{ env.REGISTRY }}/${{ github.repository }}:${{ steps.tag.outputs.tag }}
+            docker run --rm -e WALLET_MODE=workers  ${{ env.REGISTRY }}/${{ github.repository }}:${{ steps.tag.outputs.tag }}
+            ```
