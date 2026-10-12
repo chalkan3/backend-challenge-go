@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,6 +15,10 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/chalkan3/backend-challenge-go/internal/domain"
+	"github.com/chalkan3/backend-challenge-go/internal/infra/postgres"
+	sqsinfra "github.com/chalkan3/backend-challenge-go/internal/infra/sqs"
+	"github.com/chalkan3/backend-challenge-go/internal/platform/config"
+	"github.com/chalkan3/backend-challenge-go/internal/worker"
 )
 
 // TestSQSConsumerAndInboxDedup publishes the ingress contract to the queue:
@@ -228,3 +233,103 @@ func TestOutboxEventIdStableOnReplay(t *testing.T) {
 		t.Fatalf("event id not stable: %s vs %s (%v)", eventID, again, err)
 	}
 }
+
+// TestOutboxRecoversWorkAbandonedByCrashedPublisher proves the §11 recovery
+// guarantee end-to-end: a publisher interrupted BETWEEN claiming a row and
+// publishing it leaves the row claimed (attempts incremented, lease held).
+// Once the lease expires the row becomes claimable again and a RESTARTED
+// worker publishes it — the event reaches the events queue and the row is
+// durably marked published.
+func TestOutboxRecoversWorkAbandonedByCrashedPublisher(t *testing.T) {
+	ctx := context.Background()
+	store := postgres.NewStore(mustDB(t))
+
+	eventID := uuid.NewString()
+	env := domain.Envelope{
+		EventID:       eventID,
+		EventType:     "WagerTransactionProcessed",
+		AggregateType: "wager_transaction",
+		AggregateID:   uuid.NewString(),
+		OccurredAt:    time.Now().UTC(),
+		Version:       1,
+		Data:          map[string]any{"simulated": true, "note": "crashed-publisher recovery"},
+	}
+	if err := store.Repos().Outbox().Enqueue(ctx, []domain.Envelope{env}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	// STEP 1 — a publisher claims the row…
+	items, err := store.Repos().Outbox().ClaimBatch(ctx, time.Now().UTC(), time.Hour, 100)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	claimed := false
+	for _, it := range items {
+		if it.EventID.String() == eventID {
+			claimed = true
+		}
+	}
+	if !claimed {
+		t.Fatalf("event %s was not claimed by the (crashing) publisher", eventID)
+	}
+	// …and dies before publishing. The one-hour lease keeps every OTHER
+	// publisher (including the compose app instance) away while we arrange
+	// the abandoned state below.
+
+	// STEP 2 — time passes beyond the lease. Updating available_at to the
+	// past reproduces EXACTLY what the abandoned row looks like once its
+	// lease expires (attempts >= 1, published_at NULL, claimable again).
+	if _, err := mustDB(t).Exec(ctx,
+		`UPDATE integration_outbox SET available_at = now() - interval '1 second' WHERE event_id = $1`,
+		eventID); err != nil {
+		t.Fatalf("expire abandoned lease: %v", err)
+	}
+
+	// STEP 3 — a restarted instance picks the row up and publishes it.
+	client := mustSQS(t)
+	eventsURL := mustQueueURL(t, client, "integration-events.fifo")
+	w := worker.NewOutboxWorker(store,
+		sqsinfra.NewPublisher(client, sqsinfra.QueueURLs{Events: eventsURL}),
+		&config.Config{OutboxInterval: 50 * time.Millisecond, OutboxBatch: 100, OutboxLease: time.Hour},
+		testLogger, silentOutbox{})
+	wctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() { _ = w.Run(wctx) }()
+
+	pollUntil(t, 30*time.Second, func() bool {
+		out, err := client.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
+			QueueUrl:            aws.String(eventsURL),
+			MaxNumberOfMessages: 10,
+			WaitTimeSeconds:     2,
+		})
+		if err != nil {
+			return false
+		}
+		for _, m := range out.Messages {
+			if m.Body != nil && strings.Contains(*m.Body, eventID) {
+				_, _ = client.DeleteMessage(ctx, &sqs.DeleteMessageInput{
+					QueueUrl: aws.String(eventsURL), ReceiptHandle: m.ReceiptHandle,
+				})
+				return true
+			}
+		}
+		return false
+	}, "abandoned outbox row was never published after restart")
+
+	var published int
+	if err := mustDB(t).QueryRow(ctx,
+		`SELECT COUNT(*) FROM integration_outbox WHERE event_id = $1 AND published_at IS NOT NULL`,
+		eventID).Scan(&published); err != nil {
+		t.Fatal(err)
+	}
+	if published != 1 {
+		t.Fatalf("recovered row was not marked published in the database")
+	}
+}
+
+// silentOutbox satisfies worker.Instrumentation for in-process workers.
+type silentOutbox struct{}
+
+func (silentOutbox) OutboxPublished()                       {}
+func (silentOutbox) OutboxFailed()                          {}
+func (silentOutbox) OutboxStats(pending int64, lag float64) {}

@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/google/uuid"
 
 	"github.com/chalkan3/backend-challenge-go/internal/app"
@@ -32,11 +34,24 @@ func TestWalletLifecycleAndReconciliation(t *testing.T) {
 		t.Fatalf("duplicate opening: %d %v", status, body)
 	}
 
-	// zero opening: wallet created, no financial rows
+	// zero opening: wallet created, no financial rows (§9 — no OPENING,
+	// no ledger entry, no financial outbox events)
 	zWallet := openWallet(t, internal, newPlayerID(t), "0")
 	bal, _ := walletBalance(t, internal, zWallet)
 	if bal != "0.00" {
 		t.Fatalf("zero opening balance: %s", bal)
+	}
+	var zeroTxRows, zeroLedgerRows, zeroEvents int
+	if err := mustDB(t).QueryRow(t.Context(), `SELECT
+		(SELECT COUNT(*) FROM wager_transactions WHERE wallet_id = $1),
+		(SELECT COUNT(*) FROM wallet_ledger_entries WHERE wallet_id = $1),
+		(SELECT COUNT(*) FROM integration_outbox WHERE payload->'data'->>'walletId' = $1::text)`,
+		zWallet).Scan(&zeroTxRows, &zeroLedgerRows, &zeroEvents); err != nil {
+		t.Fatal(err)
+	}
+	if zeroTxRows != 0 || zeroLedgerRows != 0 || zeroEvents != 0 {
+		t.Fatalf("zero opening must not create financial rows: tx=%d ledger=%d events=%d",
+			zeroTxRows, zeroLedgerRows, zeroEvents)
 	}
 
 	// BET 25.00 → balance 975.00
@@ -115,6 +130,20 @@ func TestWagerFlowsAndIdempotency(t *testing.T) {
 	}
 	if bal, _ := walletBalance(t, internal, walletID); bal != "100.00" {
 		t.Fatalf("loss changed balance: %s", bal)
+	}
+	// §7: a LOSS must emit exactly one WagerTransactionProcessed and NO
+	// WalletBalanceChanged (no balance change → no version bump → no event).
+	lossTxID, _ := body["transactionId"].(string)
+	var lossProcessed, lossChanged int
+	if err := mustDB(t).QueryRow(t.Context(), `SELECT
+		COUNT(*) FILTER (WHERE event_type = 'WagerTransactionProcessed'),
+		COUNT(*) FILTER (WHERE event_type = 'WalletBalanceChanged')
+		FROM integration_outbox WHERE payload->'data'->>'transactionId' = $1`,
+		lossTxID).Scan(&lossProcessed, &lossChanged); err != nil {
+		t.Fatal(err)
+	}
+	if lossProcessed != 1 || lossChanged != 0 {
+		t.Fatalf("loss events: processed=%d balanceChanged=%d, want 1/0", lossProcessed, lossChanged)
 	}
 	// LOSS non-zero → 400 (validation), not persisted as rejection
 	extBadLoss := "lossbad-" + keyBase
@@ -549,5 +578,117 @@ func TestPlayerWalletMismatch(t *testing.T) {
 	st, body = api(t, "GET", "/providers/provider-a/wagering/transactions/"+extID, providerA, nil)
 	if st != 200 || body["status"] != "REJECTED" {
 		t.Fatalf("auditable rejection: %d %v", st, body)
+	}
+}
+
+// TestOpeningRejectedOverExternalChannels covers §6.3: OPENING is an
+// internal-only kind. Over HTTP the request is rejected with 400 and nothing
+// is persisted; over SQS the message is permanently invalid (business shape)
+// and must be routed to the DLQ instead of being retried forever.
+func TestOpeningRejectedOverExternalChannels(t *testing.T) {
+	internal := token(t, internalClient, internalSecret)
+	player := newPlayerID(t)
+	walletID := openWallet(t, internal, player, "50.00")
+	suffix := uuid.NewString()[:8]
+
+	// --- HTTP ---
+	status, body := submitTransaction(t, token(t, providerAClient, providerASecret), map[string]any{
+		"providerId":            "provider-a",
+		"externalTransactionId": "ext-open-" + suffix,
+		"playerId":              player,
+		"walletId":              walletID,
+		"roundId":               "r",
+		"gameId":                "fortune-chimp",
+		"kind":                  "OPENING",
+		"money":                 map[string]any{"amount": "10.00", "currency": "BRL"},
+	}, "provider-a:open-"+suffix)
+	if status != 400 {
+		t.Fatalf("OPENING over HTTP: got %d %v, want 400", status, body)
+	}
+	var rows int
+	if err := mustDB(t).QueryRow(t.Context(),
+		`SELECT COUNT(*) FROM wager_transactions WHERE provider_id = 'provider-a' AND external_transaction_id = $1`,
+		"ext-open-"+suffix).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 0 {
+		t.Fatalf("rejected OPENING must not be persisted over HTTP, found %d rows", rows)
+	}
+
+	// --- SQS ---
+	client := mustSQS(t)
+	queue := mustQueueURL(t, client, "wager-transactions.fifo")
+	dlq := mustQueueURL(t, client, "wager-transactions-dlq.fifo")
+	messageID := "msg-open-" + uuid.NewString()[:8]
+	envelope := fmt.Sprintf(
+		`{"messageId":%q,"type":"WagerTransactionRequested","occurredAt":"2026-01-01T00:00:00Z","data":{"providerId":"provider-a","externalTransactionId":"sqs-open-%s","idempotencyKey":"provider-a:sqs-open-%s","playerId":%q,"walletId":%q,"roundId":"r","gameId":"g","kind":"OPENING","money":{"amount":"10.00","currency":"BRL"}}}`,
+		messageID, suffix, suffix, player, walletID)
+	if _, err := client.SendMessage(t.Context(), &sqs.SendMessageInput{
+		QueueUrl:               aws.String(queue),
+		MessageBody:            aws.String(envelope),
+		MessageGroupId:         aws.String(walletID),
+		MessageDeduplicationId: aws.String(uuid.NewString()),
+	}); err != nil {
+		t.Fatalf("send OPENING message: %v", err)
+	}
+	pollUntil(t, 90*time.Second, func() bool {
+		out, err := client.ReceiveMessage(t.Context(), &sqs.ReceiveMessageInput{
+			QueueUrl:            aws.String(dlq),
+			MaxNumberOfMessages: 10,
+			WaitTimeSeconds:     2,
+		})
+		if err != nil {
+			return false
+		}
+		for _, m := range out.Messages {
+			if m.Body != nil && *m.Body == envelope {
+				_, _ = client.DeleteMessage(t.Context(), &sqs.DeleteMessageInput{
+					QueueUrl: aws.String(dlq), ReceiptHandle: m.ReceiptHandle,
+				})
+				return true
+			}
+		}
+		return false
+	}, "OPENING message must be routed to the DLQ as permanently invalid")
+}
+
+// TestDifferentWalletsMoveInParallel proves the concurrency strategy is
+// per-wallet (§8): simultaneous bets on DISTINCT wallets must both succeed.
+// A global lock would serialize them (and could cross-reject); row-level
+// wallet locks must keep different wallets independent.
+func TestDifferentWalletsMoveInParallel(t *testing.T) {
+	internal := token(t, internalClient, internalSecret)
+	providerA := token(t, providerAClient, providerASecret)
+
+	players := [2]string{newPlayerID(t), newPlayerID(t)}
+	wallets := [2]string{
+		openWallet(t, internal, players[0], "100.00"),
+		openWallet(t, internal, players[1], "100.00"),
+	}
+
+	type outcome struct {
+		status int
+		body   map[string]any
+	}
+	results := make(chan outcome, 2)
+	for i := 0; i < 2; i++ {
+		i := i
+		extID := "par-" + uuid.NewString()[:8]
+		go func() {
+			st, body := submitTransaction(t, providerA, betBody("provider-a", extID, players[i], wallets[i], "80.00"),
+				"provider-a:"+extID)
+			results <- outcome{st, body}
+		}()
+	}
+	for i := 0; i < 2; i++ {
+		r := <-results
+		if r.status != 200 || r.body["status"] != "PROCESSED" {
+			t.Fatalf("distinct wallets must process in parallel without cross-rejection: %d %v", r.status, r.body)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		if bal, _ := walletBalance(t, internal, wallets[i]); bal != "20.00" {
+			t.Fatalf("wallet %d balance: %s, want 20.00", i, bal)
+		}
 	}
 }
