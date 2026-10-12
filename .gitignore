@@ -1,0 +1,19 @@
+# Binários e artefatos de build
+/walletd
+/out/
+*.exe
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Ambiente local (nunca commitar segredos/DSNs locais)
+.env
+.env.local
+
+# Artefatos de ferramentas de agente/editor — não fazem parte do projeto
+octopus-skills/
+.idea/
+.vscode/
+*.swp
+.DS_Store
