@@ -52,7 +52,22 @@ func NewWalletService(txm TxManager, log *slog.Logger, hook Instrumentation, opt
 // A positive opening produces PROCESSED OPENING + CREDIT ledger +
 // WagerTransactionProcessed + WalletBalanceChanged; a zero opening creates
 // only the wallet (version 1, no financial rows).
-func (s *WalletService) Open(ctx context.Context, in OpenWalletInput) (WalletView, error) {
+func (s *WalletService) Open(ctx context.Context, in OpenWalletInput) (view WalletView, err error) {
+	ctx, span := s.hook.StartSpan(ctx, SpanWalletOpen,
+		Attr(AttrPlayerID, in.PlayerID),
+		Attr(AttrCurrency, in.Currency),
+	)
+	defer func() {
+		if err == nil {
+			span.SetAttributes(
+				Attr(AttrWalletID, view.ID.String()),
+				Attr(AttrBalanceMinor, view.Balance.AmountMinor()),
+			)
+		}
+		span.RecordError(err)
+		span.End()
+	}()
+
 	playerID, err := domain.ParseID(in.PlayerID)
 	if err != nil {
 		return WalletView{}, &ValidationError{Detail: "playerId: " + err.Error()}
@@ -64,7 +79,6 @@ func (s *WalletService) Open(ctx context.Context, in OpenWalletInput) (WalletVie
 	if err != nil {
 		return WalletView{}, &ValidationError{Detail: "initialBalance: " + err.Error()}
 	}
-	var view WalletView
 	err = s.txm.WithinTx(ctx, func(ctx context.Context, r Repos) error {
 		if _, err := r.Wallets().GetByPlayerAndCurrency(ctx, playerID, in.Currency, false); err == nil {
 			return &ConflictError{Code: CodeWalletExists, Detail: "wallet already exists for this player and currency"}

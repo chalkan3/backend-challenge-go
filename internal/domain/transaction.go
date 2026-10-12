@@ -129,30 +129,14 @@ type WagerTransaction struct {
 // NewExternalTransaction validates the business rules of an incoming external
 // operation and returns a PENDING transaction (not yet persisted).
 func NewExternalTransaction(p ExternalTxParams) (*WagerTransaction, error) {
-	// kind identity is validated before any other rule, so unknown kinds are
-	// never mistaken for missing-metadata rejections
-	switch p.Kind {
-	case KindOpening:
-		return nil, ErrInvalidKind.With("kind %q is internal-only and rejected over HTTP/SQS", p.Kind)
-	case KindBet, KindWin, KindLoss, KindRefund, KindRollback:
-	default:
-		return nil, ErrInvalidKind.With("unknown kind %q", p.Kind)
-	}
-	if p.ProviderID == "" || p.ExternalTransactionID == "" {
-		return nil, ErrInvalidTransaction.With("providerId and externalTransactionId are required")
-	}
-	// Amount policy per kind: LOSS must be exactly zero; every other external
-	// kind must be strictly positive.
-	if p.Kind == KindLoss {
-		if !p.Money.IsZero() {
-			return nil, ErrInvalidAmount.With("LOSS requires amount 0.00, got %s", p.Money.String())
-		}
-	} else if !p.Money.IsPositive() {
-		return nil, ErrInvalidAmount.With("%s requires a positive amount, got %s", p.Kind, p.Money.String())
-	}
-	needsRef := p.Kind == KindRefund || p.Kind == KindRollback
-	if needsRef && p.ReferenceExternalTxID == "" {
-		return nil, ErrMissingReference
+	// The shape of an external operation is validated by a composed
+	// Specification chain (see spec_transaction.go). Rules are evaluated in a
+	// fixed order so the most fundamental error wins: kind identity before
+	// missing metadata, amount policy before reference requirements. This
+	// keeps the published failure codes stable while making each rule an
+	// individually testable, named value.
+	if err := externalTransactionSpecification.IsSatisfiedBy(p); err != nil {
+		return nil, err
 	}
 	id, err := NewID()
 	if err != nil {

@@ -30,19 +30,11 @@ type WagerService struct {
 	txm        TxManager
 	log        *slog.Logger
 	hook       Instrumentation
-	strategies map[domain.TxKind]wagerStrategy
+	strategies *StrategyRegistry
 
 	refMaxAttempts int
 	refTTL         time.Duration
 }
-
-// wagerStrategy is the Strategy contract for one transaction kind. It runs
-// after the shared pipeline has validated the input and locked the wallet;
-// save distinguishes INSERT (first attempt) from SAVE (reference retry).
-type wagerStrategy func(
-	ctx context.Context, r Repos,
-	t *domain.WagerTransaction, w *domain.Wallet,
-) (WagerResult, error)
 
 // WagerOption customizes a WagerService at construction time (functional
 // options pattern; the zero value keeps the documented defaults).
@@ -71,30 +63,26 @@ func NewWagerService(txm TxManager, log *slog.Logger, hook Instrumentation, opts
 		refMaxAttempts: DefaultReferenceMaxAttempts,
 		refTTL:         DefaultReferenceTTL,
 	}
-	// Strategy registry: one entry per externally processable kind. The
-	// shared pipeline (idempotency, wallet lock, persistence) lives in
-	// execute; only the kind-specific financial effect differs.
-	s.strategies = map[domain.TxKind]wagerStrategy{
-		domain.KindBet: func(ctx context.Context, r Repos, t *domain.WagerTransaction, w *domain.Wallet) (WagerResult, error) {
-			return s.processMovement(ctx, r, t, w, nil, false)
-		},
-		domain.KindWin: func(ctx context.Context, r Repos, t *domain.WagerTransaction, w *domain.Wallet) (WagerResult, error) {
-			return s.processMovement(ctx, r, t, w, nil, false)
-		},
-		domain.KindLoss: func(ctx context.Context, r Repos, t *domain.WagerTransaction, w *domain.Wallet) (WagerResult, error) {
-			return s.processLoss(ctx, r, t, w, false)
-		},
-		domain.KindRefund: func(ctx context.Context, r Repos, t *domain.WagerTransaction, w *domain.Wallet) (WagerResult, error) {
-			return s.processReversal(ctx, r, t, w, false)
-		},
-		domain.KindRollback: func(ctx context.Context, r Repos, t *domain.WagerTransaction, w *domain.Wallet) (WagerResult, error) {
-			return s.processReversal(ctx, r, t, w, false)
-		},
-	}
+	// Strategy registry (Open/Closed): one strategy per externally
+	// processable kind. The shared pipeline (idempotency, wallet lock,
+	// persistence, outbox) lives in execute; only the kind-specific
+	// financial effect differs and is registered in defaultRegistry.
+	s.strategies = s.defaultRegistry()
 	for _, opt := range opts {
 		opt(s)
 	}
 	return s
+}
+
+// WithStrategyRegistry replaces the built-in strategy registry, allowing a
+// caller (or test) to extend or override the kind dispatch without touching
+// the shared pipeline. This is the extension seam of the wager use case.
+func WithStrategyRegistry(reg *StrategyRegistry) WagerOption {
+	return func(s *WagerService) {
+		if reg != nil {
+			s.strategies = reg
+		}
+	}
 }
 
 // Stable domain failure codes (persisted and returned to providers).
@@ -260,7 +248,30 @@ func (s *WagerService) buildTransaction(in ExternalInput) (*domain.WagerTransact
 	return t, nil
 }
 
-func (s *WagerService) execute(ctx context.Context, r Repos, t *domain.WagerTransaction) (WagerResult, error) {
+// execute is the shared pipeline (idempotency → identity → wallet lock →
+// strategy dispatch) used by Submit, ExecuteInTx and ResolvePending. It
+// opens the wallet.wager.execute span; because every entry point — HTTP and
+// SQS — funnels through here, the operation is traced exactly once,
+// regardless of channel.
+func (s *WagerService) execute(ctx context.Context, r Repos, t *domain.WagerTransaction) (res WagerResult, err error) {
+	ctx, span := s.hook.StartSpan(ctx, SpanWagerExecute,
+		Attr(AttrKind, string(t.Kind())),
+		Attr(AttrProviderID, t.ProviderID()),
+		Attr(AttrWalletID, t.WalletID().String()),
+		Attr(AttrChannel, string(t.ReceivedVia())),
+	)
+	defer func() {
+		// Annotate the classified result (PROCESSED / PENDING / REJECTED and
+		// the failure code) while the span is still open. A rejected business
+		// outcome is a valid result, not a fault, so only a non-nil error
+		// marks the span as failed.
+		if res.Transaction != nil {
+			span.SetOutcome(string(res.Transaction.Status()), res.Transaction.FailureCode())
+		}
+		span.RecordError(err)
+		span.End()
+	}()
+
 	// 1. Durable idempotency by (providerId, idempotencyKey).
 	existing, err := r.Transactions().GetByProviderAndKey(ctx, t.ProviderID(), t.IdempotencyKey())
 	switch {
@@ -270,6 +281,9 @@ func (s *WagerService) execute(ctx context.Context, r Repos, t *domain.WagerTran
 				Detail: "idempotency key reused with a different payload"}
 		}
 		s.hook.Duplicate("idempotent_replay")
+		span.SetAttributes(
+			Attr(AttrDuplicate, true),
+			Attr(AttrDuplicateSrc, "idempotent_replay"))
 		return s.replayResult(ctx, r, existing)
 	case errors.Is(err, ErrRepoNotFound):
 		// new operation
@@ -318,7 +332,7 @@ func (s *WagerService) execute(ctx context.Context, r Repos, t *domain.WagerTran
 // map is built once in NewWagerService; unknown (internal-only) kinds fall
 // to the not-processable validation error.
 func (s *WagerService) dispatch(ctx context.Context, r Repos, t *domain.WagerTransaction, w *domain.Wallet) (WagerResult, error) {
-	strategy, ok := s.strategies[t.Kind()]
+	strategy, ok := s.strategies.Lookup(t.Kind())
 	if !ok {
 		return WagerResult{}, &ValidationError{Detail: "kind is not processable"}
 	}
