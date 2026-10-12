@@ -120,6 +120,24 @@ func (s *WagerService) Submit(ctx context.Context, in ExternalInput) (WagerResul
 		res, err = s.execute(ctx, r, t)
 		return err
 	})
+	if errors.Is(err, ErrDuplicateInsert) {
+		// Lost an insert race against a concurrent request with the same
+		// identity. The unique violation only surfaces after the winner's
+		// transaction commits, and our own transaction is aborted (25P02),
+		// so the persisted outcome is re-read in a FRESH transaction and
+		// served as an idempotent replay.
+		var rep WagerResult
+		err = s.txm.WithinTx(ctx, func(ctx context.Context, r Repos) error {
+			var rerr error
+			rep, rerr = s.duplicateRaceReplay(ctx, r, t)
+			return rerr
+		})
+		if err != nil {
+			return WagerResult{}, err
+		}
+		s.emitOutcome(t.Kind(), rep, in.ReceivedVia)
+		return rep, nil
+	}
 	if err != nil {
 		return WagerResult{}, err
 	}
@@ -202,14 +220,19 @@ func (s *WagerService) execute(ctx context.Context, r Repos, t *domain.WagerTran
 		return WagerResult{}, err
 	}
 
-	// 2. Same (providerId, externalTransactionId) under another key is
-	// forbidden — one financial operation, one identity.
+	// 2. Same (providerId, externalTransactionId) under ANOTHER key is
+	// forbidden — one financial operation, one identity. Under the SAME key
+	// this is the concurrent winner of our own identity: serve its persisted
+	// outcome as an idempotent replay instead of a spurious conflict.
 	byExternal, err := r.Transactions().GetByProviderAndExternal(ctx, t.ProviderID(), t.ExternalTxID())
 	switch {
 	case err == nil:
-		_ = byExternal
-		return WagerResult{}, &ConflictError{Code: CodeExternalIDConflict,
-			Detail: "external transaction id already processed under a different idempotency key"}
+		if byExternal.IdempotencyKey() != t.IdempotencyKey() {
+			return WagerResult{}, &ConflictError{Code: CodeExternalIDConflict,
+				Detail: "external transaction id already processed under a different idempotency key"}
+		}
+		s.hook.Duplicate("idempotent_replay")
+		return s.replayResult(ctx, r, byExternal)
 	case errors.Is(err, ErrRepoNotFound):
 	default:
 		return WagerResult{}, err
@@ -229,7 +252,13 @@ func (s *WagerService) execute(ctx context.Context, r Repos, t *domain.WagerTran
 		return s.persistRejection(ctx, r, t, w, false, FailPlayerWalletMismatch, "wallet does not belong to the informed player")
 	}
 
-	// 4. Kind dispatch.
+	// 4. Kind dispatch. A lost insert race surfaces as ErrDuplicateInsert
+	// after the transaction aborts; recovery lives in Submit (fresh tx).
+	return s.dispatch(ctx, r, t, w)
+}
+
+// dispatch runs the kind-specific path (shared by execute).
+func (s *WagerService) dispatch(ctx context.Context, r Repos, t *domain.WagerTransaction, w *domain.Wallet) (WagerResult, error) {
 	switch t.Kind() {
 	case domain.KindLoss:
 		return s.processLoss(ctx, r, t, w, false)
@@ -240,6 +269,29 @@ func (s *WagerService) execute(ctx context.Context, r Repos, t *domain.WagerTran
 	default:
 		return WagerResult{}, &ValidationError{Detail: "kind is not processable"}
 	}
+}
+
+// duplicateRaceReplay resolves a lost insert race: a concurrent request with
+// the same (providerId, idempotencyKey) — or the same external id under a
+// different key — won the unique index. PostgreSQL only raises the violation
+// after the winner's transaction commits, so the persisted outcome is visible
+// and becomes an idempotent replay instead of a spurious 500.
+func (s *WagerService) duplicateRaceReplay(ctx context.Context, r Repos, t *domain.WagerTransaction) (WagerResult, error) {
+	existing, err := r.Transactions().GetByProviderAndKey(ctx, t.ProviderID(), t.IdempotencyKey())
+	if err != nil {
+		if errors.Is(err, ErrRepoNotFound) { // winner used a different key for the same external id
+			existing, err = r.Transactions().GetByProviderAndExternal(ctx, t.ProviderID(), t.ExternalTxID())
+		}
+		if err != nil {
+			return WagerResult{}, err
+		}
+	}
+	if existing.PayloadHash() != t.PayloadHash() {
+		return WagerResult{}, &ConflictError{Code: CodeIdemKeyConflict,
+			Detail: "idempotency key reused with a different payload"}
+	}
+	s.hook.Duplicate("insert_race_replay")
+	return s.replayResult(ctx, r, existing)
 }
 
 // resolve advances a claimed PENDING_REFERENCE transaction.

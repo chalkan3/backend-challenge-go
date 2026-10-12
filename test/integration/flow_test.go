@@ -692,3 +692,94 @@ func TestDifferentWalletsMoveInParallel(t *testing.T) {
 		}
 	}
 }
+
+// TestSameBetFiftyTimesInParallel is the mandatory §13 concurrency test:
+// the SAME bet (same provider, same external id, same idempotency key) is
+// submitted 50 times in parallel. Exactly one execution moves money; the
+// other 49 are idempotent replays; the ledger holds a single debit and the
+// balance drops exactly once.
+func TestSameBetFiftyTimesInParallel(t *testing.T) {
+	internal := token(t, internalClient, internalSecret)
+	providerA := token(t, providerAClient, providerASecret)
+	player := newPlayerID(t)
+	walletID := openWallet(t, internal, player, "500.00")
+
+	extID := "same-bet-50-" + uuid.NewString()[:8]
+	body := betBody("provider-a", extID, player, walletID, "80.00")
+	key := "provider-a:" + extID
+
+	const n = 50
+	type result struct {
+		status int
+		body   map[string]any
+	}
+	results := make([]result, n)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			st, b := submitTransaction(t, providerA, body, key)
+			results[i] = result{st, b}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	processed, replays := 0, 0
+	for i, r := range results {
+		if r.status != 200 {
+			t.Fatalf("submission %d: status %d body %v", i, r.status, r.body)
+		}
+		if r.body["status"] != "PROCESSED" {
+			t.Fatalf("submission %d: status %v", i, r.body["status"])
+		}
+		if r.body["idempotentReplay"] == true {
+			replays++
+		} else {
+			processed++
+		}
+	}
+	if processed != 1 || replays != n-1 {
+		t.Fatalf("processed=%d replays=%d, want 1/%d", processed, replays, n-1)
+	}
+
+	// balance moved exactly once: 500.00 - 80.00
+	if bal, _ := walletBalance(t, internal, walletID); bal != "420.00" {
+		t.Fatalf("balance: %s, want 420.00", bal)
+	}
+
+	// a single debit in the ledger
+	pool := mustDB(t)
+	var debits int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT COUNT(*) FROM wallet_ledger_entries WHERE wallet_id = $1 AND direction = 'DEBIT'`,
+		walletID).Scan(&debits); err != nil {
+		t.Fatal(err)
+	}
+	if debits != 1 {
+		t.Fatalf("debit entries: %d, want 1", debits)
+	}
+
+	// one durable transaction row for the operation
+	var txs int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT COUNT(*) FROM wager_transactions WHERE provider_id='provider-a' AND external_transaction_id=$1`,
+		extID).Scan(&txs); err != nil {
+		t.Fatal(err)
+	}
+	if txs != 1 {
+		t.Fatalf("transaction rows: %d, want 1", txs)
+	}
+
+	// a late replay does not alter the outcome
+	st, body := submitTransaction(t, providerA, body, key)
+	if st != 200 || body["idempotentReplay"] != true {
+		t.Fatalf("late replay: %d %v", st, body)
+	}
+	if bal, _ := walletBalance(t, internal, walletID); bal != "420.00" {
+		t.Fatalf("balance after late replay: %s", bal)
+	}
+}

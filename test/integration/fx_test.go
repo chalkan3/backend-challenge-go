@@ -23,6 +23,10 @@ func TestFxCompositionAndLifecycle(t *testing.T) {
 	t.Setenv("WALLET_AUTH_JWKS_URL", "")
 	t.Setenv("WALLET_MIGRATE_ON_START", "false") // migrations covered by the compose app / CLI
 	t.Setenv("WALLET_WORKERS_ENABLED", "true")
+	// Short long-poll: when this instance stops mid-poll, LocalStack keeps
+	// the dead receiver slot until its wait expires and delays deliveries to
+	// the live consumers; 1s keeps that window negligible.
+	t.Setenv("WALLET_SQS_WAIT_SECONDS", "1")
 	t.Setenv("WALLET_OUTBOX_INTERVAL", "200ms")
 	t.Setenv("WALLET_REFERENCE_INTERVAL", "200ms")
 

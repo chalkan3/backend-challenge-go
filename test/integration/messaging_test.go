@@ -333,3 +333,131 @@ type silentOutbox struct{}
 func (silentOutbox) OutboxPublished()                       {}
 func (silentOutbox) OutboxFailed()                          {}
 func (silentOutbox) OutboxStats(pending int64, lag float64) {}
+
+// TestCrossChannelSameOperation exercises the requirement that HTTP and SQS
+// share one idempotency space: the SAME operation (same provider, external
+// id and idempotency key) arrives once per channel, in both orders.
+// Exactly one financial effect exists per operation, and the HTTP replay of
+// an SQS-processed operation returns the balance observed at original
+// processing time — even after the wallet moved on.
+func TestCrossChannelSameOperation(t *testing.T) {
+	internal := token(t, internalClient, internalSecret)
+	providerA := token(t, providerAClient, providerASecret)
+	player := newPlayerID(t)
+	walletID := openWallet(t, internal, player, "100.00")
+	client := mustSQS(t)
+	queue := mustQueueURL(t, client, "wager-transactions.fifo")
+	ctx := context.Background()
+
+	sendRequested := func(messageID string, data domain.WagerTransactionRequestedData) {
+		t.Helper()
+		b, err := json.Marshal(map[string]any{
+			"messageId":  messageID,
+			"type":       domain.EventWagerTransactionRequested,
+			"occurredAt": time.Now().UTC().Format(time.RFC3339Nano),
+			"data":       data,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := client.SendMessage(ctx, &sqs.SendMessageInput{
+			QueueUrl:               aws.String(queue),
+			MessageBody:            aws.String(string(b)),
+			MessageGroupId:         aws.String(walletID),
+			MessageDeduplicationId: aws.String(uuid.NewString()),
+		}); err != nil {
+			t.Fatalf("send: %v", err)
+		}
+	}
+
+	// --- operation 1: HTTP first, SQS replay second -----------------------
+	id1 := "xch-http-" + uuid.NewString()[:8]
+	d1 := domain.WagerTransactionRequestedData{
+		ProviderID: "provider-a", ExternalTransactionID: id1,
+		IdempotencyKey: "provider-a:" + id1,
+		PlayerID:       player, WalletID: walletID, RoundID: "xch-1", GameID: "fortune-chimp",
+		Kind: "BET", Money: domain.MoneyPayload{Amount: "30.00", Currency: "BRL"},
+	}
+	st, body := submitTransaction(t, providerA, map[string]any{
+		"providerId": "provider-a", "externalTransactionId": id1,
+		"playerId": player, "walletId": walletID, "roundId": "xch-1", "gameId": "fortune-chimp",
+		"kind": "BET", "money": map[string]string{"amount": "30.00", "currency": "BRL"},
+	}, d1.IdempotencyKey)
+	if st != 200 || body["status"] != "PROCESSED" || body["idempotentReplay"] == true {
+		t.Fatalf("op1 http: %d %v", st, body)
+	}
+	if bal, _ := walletBalance(t, internal, walletID); bal != "70.00" {
+		t.Fatalf("op1 balance: %s, want 70.00", bal)
+	}
+
+	msg1 := "msg-xch-1-" + uuid.NewString()[:8]
+	sendRequested(msg1, d1)
+	pool := mustDB(t)
+	pollUntil(t, 45*time.Second, func() bool {
+		var done int
+		if err := pool.QueryRow(ctx,
+			`SELECT COUNT(*) FROM consumer_inbox WHERE message_id=$1 AND completed_at IS NOT NULL`,
+			msg1).Scan(&done); err != nil {
+			t.Fatal(err)
+		}
+		return done == 1
+	}, "sqs replay of op1 never committed")
+	var entries1 int
+	if err := pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM wallet_ledger_entries l JOIN wager_transactions wt ON wt.id=l.transaction_id
+		 WHERE wt.provider_id='provider-a' AND wt.external_transaction_id=$1`, id1).Scan(&entries1); err != nil {
+		t.Fatal(err)
+	}
+	if entries1 != 1 {
+		t.Fatalf("op1 ledger entries: %d, want 1 (SQS replay must not move money)", entries1)
+	}
+	if bal, _ := walletBalance(t, internal, walletID); bal != "70.00" {
+		t.Fatalf("op1 balance after sqs replay: %s, want 70.00", bal)
+	}
+
+	// --- operation 2: SQS first, HTTP replay second ------------------------
+	id2 := "xch-sqs-" + uuid.NewString()[:8]
+	d2 := domain.WagerTransactionRequestedData{
+		ProviderID: "provider-a", ExternalTransactionID: id2,
+		IdempotencyKey: "provider-a:" + id2,
+		PlayerID:       player, WalletID: walletID, RoundID: "xch-2", GameID: "fortune-chimp",
+		Kind: "WIN", Money: domain.MoneyPayload{Amount: "10.00", Currency: "BRL"},
+	}
+	sendRequested("msg-xch-2-"+uuid.NewString()[:8], d2)
+	pollUntil(t, 45*time.Second, func() bool {
+		_, b := api(t, "GET", "/providers/provider-a/wagering/transactions/"+id2, providerA, nil)
+		return b["status"] == string(domain.StatusProcessed)
+	}, "sqs op2 never processed")
+
+	// HTTP replay of the SQS-processed operation: result + balance observed
+	// at the original processing (70.00 + 10.00 = 80.00).
+	st, body = submitTransaction(t, providerA, map[string]any{
+		"providerId": "provider-a", "externalTransactionId": id2,
+		"playerId": player, "walletId": walletID, "roundId": "xch-2", "gameId": "fortune-chimp",
+		"kind": "WIN", "money": map[string]string{"amount": "10.00", "currency": "BRL"},
+	}, d2.IdempotencyKey)
+	if st != 200 || body["idempotentReplay"] != true {
+		t.Fatalf("op2 http replay: %d %v", st, body)
+	}
+	if bal, _ := body["balance"].(map[string]any); bal == nil || bal["amount"] != "80.00" {
+		t.Fatalf("op2 replay balance: %v, want 80.00 (original observed)", body["balance"])
+	}
+
+	// the wallet moves on; the replay must STILL report the original balance
+	id3 := "xch-after-" + uuid.NewString()[:8]
+	st, _ = submitTransaction(t, providerA, betBody("provider-a", id3, player, walletID, "5.00"), "provider-a:"+id3)
+	if bal, _ := walletBalance(t, internal, walletID); bal != "75.00" {
+		t.Fatalf("post-op3 balance: %s, want 75.00", bal)
+	}
+	st, body = submitTransaction(t, providerA, map[string]any{
+		"providerId": "provider-a", "externalTransactionId": id2,
+		"playerId": player, "walletId": walletID, "roundId": "xch-2", "gameId": "fortune-chimp",
+		"kind": "WIN", "money": map[string]string{"amount": "10.00", "currency": "BRL"},
+	}, d2.IdempotencyKey)
+	if st != 200 || body["idempotentReplay"] != true {
+		t.Fatalf("op2 late replay: %d %v", st, body)
+	}
+	if bal, _ := body["balance"].(map[string]any); bal == nil || bal["amount"] != "80.00" {
+		t.Fatalf("op2 late replay balance: %v, want 80.00 (original observed, not current)", body["balance"])
+	}
+}
