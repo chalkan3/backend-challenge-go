@@ -1,4 +1,4 @@
-.PHONY: build fmt vet test test-race test-integration e2e up up-multi down logs migrate-up migrate-down migrate-status
+.PHONY: build fmt vet test test-race test-integration e2e up up-multi up-split down logs migrate-up migrate-down migrate-status
 
 build:
 	go build ./...
@@ -23,17 +23,24 @@ test-integration:
 # Validação end-to-end em um comando: sobe a stack, espera os healthchecks de
 # verdade, roda a suíte (incluindo os testes de jornada) e derruba tudo.
 #   make e2e                  # stack completa + suíte
+#   make e2e SPLIT=1          # api + workers como processos separados
 #   make e2e ARGS="-run Journey"
 #   make e2e MULTI=1          # inclui as instâncias extras (app-2/app-3)
 #   make e2e KEEP=1           # deixa a stack no ar ao final
 e2e:
-	./scripts/e2e.sh $(ARGS)
+	SPLIT=$(SPLIT) MULTI=$(MULTI) KEEP=$(KEEP) ./scripts/e2e.sh $(ARGS)
 
 up:
 	docker compose up --build -d
 
 up-multi:
 	docker compose --profile multi up --build -d
+
+# Two-role topology: one image, two processes (WALLET_MODE=api / workers).
+# api :8084 owns the whole pool for request handling; workers :8085 drains the
+# queue. Scale each side on its own dimension: --scale workers=4.
+up-split:
+	docker compose --profile split up --build -d
 
 down:
 	docker compose down -v

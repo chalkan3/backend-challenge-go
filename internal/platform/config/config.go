@@ -14,6 +14,10 @@ import (
 )
 
 type Config struct {
+	// Mode selects which roles this process runs (see mode.go). The service is
+	// one binary with three modes instead of three binaries.
+	Mode Mode
+
 	HTTPAddr      string
 	ShutdownGrace time.Duration
 	LogLevel      string
@@ -67,7 +71,12 @@ type Config struct {
 }
 
 func Load() (*Config, error) {
+	mode, err := parseMode(os.Getenv("WALLET_MODE"))
+	if err != nil {
+		return nil, err
+	}
 	c := &Config{
+		Mode:          mode,
 		HTTPAddr:      env("WALLET_HTTP_ADDR", ":8080"),
 		ShutdownGrace: envDuration("WALLET_SHUTDOWN_GRACE", 20*time.Second),
 		LogLevel:      env("WALLET_LOG_LEVEL", "info"),

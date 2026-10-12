@@ -90,7 +90,16 @@ func NewRouter(d Deps) http.Handler {
 	}
 
 	mux := http.NewServeMux()
-	for _, r := range append(business, public...) {
+	// Routes are mounted regardless of mode. In workers mode the process
+	// still serves /health/* and /metrics (probes and scraping must not
+	// depend on the role), but the business routes stay unregistered so a
+	// misrouted request gets an honest 404 instead of being handled by a
+	// process that was never meant to take traffic.
+	routes := public
+	if d.Cfg.Mode.ServesBusinessRoutes() {
+		routes = append(business, public...)
+	}
+	for _, r := range routes {
 		mux.Handle(r.method, r.handler)
 	}
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {

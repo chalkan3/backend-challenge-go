@@ -3,7 +3,9 @@
 # runs the integration suite (including the journey tests), and tears
 # everything down — even if a test fails or you hit Ctrl-C.
 #
-#   ./scripts/e2e.sh              # full stack + suite
+#   ./scripts/e2e.sh              # full stack + suite (combined app)
+#   SPLIT=1 ./scripts/e2e.sh      # two-role topology: WALLET_MODE=api + workers
+#   MULTI=1 ./scripts/e2e.sh      # three combined apps (distributed concurrency)
 #   ./scripts/e2e.sh -run Journey # pass extra flags straight to `go test`
 #   KEEP=1 ./scripts/e2e.sh       # leave the stack running afterwards
 #
@@ -28,9 +30,24 @@ echo "==> using: $COMPOSE"
 
 PROFILE_FLAGS=()
 APP_SERVICES=(app)
+API_URL_DEFAULT="http://localhost:8081"
 if [ "${MULTI:-0}" = "1" ]; then
   PROFILE_FLAGS+=(--profile multi)
   APP_SERVICES+=(app-2 app-3)
+fi
+# SPLIT=1 exercises the two-role topology (WALLET_MODE=api + WALLET_MODE=workers)
+# instead of the combined `app`. Same image, same suite: the point is that the
+# API-only process answers traffic while a separate workers process drains the
+# queue, proving the mode switch is a real deployment option and not a flag
+# that only logs.
+if [ "${SPLIT:-0}" = "1" ]; then
+  if [ "${MULTI:-0}" = "1" ]; then
+    echo "error: SPLIT=1 and MULTI=1 are different topologies; pick one" >&2
+    exit 2
+  fi
+  PROFILE_FLAGS+=(--profile split)
+  APP_SERVICES=(api workers)
+  API_URL_DEFAULT="http://localhost:8084"
 fi
 
 cleanup() {
@@ -85,7 +102,7 @@ for svc in "${APP_SERVICES[@]}"; do wait_healthy "$svc" 180; done
 
 # ── 3. Run the suite against the live stack ────────────────────────────────
 # Exported explicitly so `go test` never falls back to a surprising default.
-export WALLET_TEST_API_URL="${WALLET_TEST_API_URL:-http://localhost:8081}"
+export WALLET_TEST_API_URL="${WALLET_TEST_API_URL:-$API_URL_DEFAULT}"
 export WALLET_TEST_DB_DSN="${WALLET_TEST_DB_DSN:-postgres://wallet:wallet@localhost:5433/wallet?sslmode=disable}"
 export WALLET_TEST_SQS_ENDPOINT="${WALLET_TEST_SQS_ENDPOINT:-http://localhost:4566}"
 export WALLET_TEST_KEYCLOAK="${WALLET_TEST_KEYCLOAK:-http://localhost:8080}"
@@ -95,6 +112,9 @@ echo "==> running integration suite (race detector on)"
 if ! go test -race -count=1 -tags=integration -timeout 15m -v ./test/integration/... "$@"; then
   echo "" >&2
   echo "==> suite FAILED — last 80 lines of the app log (for triage):" >&2
-  $COMPOSE logs --tail=80 app >&2 || true
+  for svc in "${APP_SERVICES[@]}"; do
+    echo "--- $svc ---" >&2
+    $COMPOSE ${PROFILE_FLAGS[@]:-} logs --tail=80 "$svc" >&2 || true
+  done
   exit 1
 fi

@@ -31,6 +31,7 @@ transactional outbox, inbox durável e controle de concorrência por carteira.
 - [Stack](#-stack)
 - [Estrutura do projeto](#-estrutura-do-projeto)
 - [Subindo o ambiente](#-subindo-o-ambiente)
+  - [Um binário, três modos](#um-binário-três-modos-e-por-que-não-três-binários)
 - [Observabilidade](#-observabilidade)
 - [API](#-api)
 - [Testes](#-testes)
@@ -244,6 +245,13 @@ docker compose up --build          # postgres + keycloak + localstack + app
 | 🐘 PostgreSQL | localhost:5433 | `wallet`/`wallet` |
 | 📊 Grafana | http://localhost:3000 | só com `--profile observability` |
 
+Com `--profile split` (a mesma imagem em dois papéis):
+
+| Serviço | Endereço | Papel |
+| :-- | :-- | :-- |
+| 🟢 **API** | http://localhost:8084 | `WALLET_MODE=api` — rotas de negócio, pool dedicado |
+| ⚙️ **Workers** | http://localhost:8085 | `WALLET_MODE=workers` — só `/health/*` e `/metrics` |
+
 O container da aplicação **aplica as migrations no start**, importa o realm
 `wallet` (automático) e cria as filas SQS via script de init do LocalStack.
 
@@ -251,6 +259,80 @@ O container da aplicação **aplica as migrations no start**, importa o realm
 
 ```sh
 docker compose --profile multi up --build -d   # app-1 (:8081), app-2 (:8082), app-3 (:8083)
+```
+
+### Um binário, três modos (e por que não três binários)
+
+`WALLET_MODE` seleciona os papéis que **este processo** executa. É a mesma
+imagem, o mesmo grafo Fx — só muda o que é iniciado:
+
+| `WALLET_MODE` | HTTP de negócio | Workers | Migrations no start |
+| :-- | :--: | :--: | :--: |
+| `all` (padrão) | ✅ | ✅ | ✅ |
+| `api` | ✅ | ❌ | ✅ |
+| `workers` | ❌ (só `/health/*` e `/metrics`) | ✅ | ❌ |
+
+```sh
+docker compose --profile split up --build -d   # api :8084  +  workers :8085
+```
+
+**Por que um binário com modos, e não três binários.** A pergunta que importa
+não é "dá para separar?", e sim "separar compra alguma coisa?". Compra — mas
+não a que parece à primeira vista:
+
+- **Throughput não.** A concorrência do consumer é **por processo**
+  (`sem := make(chan struct{}, cfg.ConsumerConcurrency)` em `consumer.go`).
+  Duas réplicas de um binário `workers` e duas réplicas de um binário
+  combinado entregam exatamente a mesma capacidade. Separar não deu
+  paralelismo novo, só mudou o endereço dele.
+- **Isolamento de recursos, sim — e é o motivo real.** O pool pgx é
+  compartilhado entre API e workers (`WALLET_DB_MAX_CONNS`). Um backlog de
+  fila faz o consumer segurar conexões e pode **estrangurar o tráfego HTTP** no
+  mesmo processo. No modo `api` o pool pertence inteiro ao request handling
+  (`DB_MAX_CONNS=15`), no modo `workers` ele é dimensionado para a fila
+  (`DB_MAX_CONNS=5`) — e cada lado escala na sua dimensão: API por latência,
+  workers por profundidade de fila (`ApproximateNumberOfMessages`).
+- **Ciclo de vida, sim.** Workers drenam no `SIGTERM` dentro de um grace
+  period; separar permite dar ao `api` um grace curto (rotação rápida) e aos
+  workers um grace longo (terminar o lote em voo) sem negociar um valor único.
+- **Migrations, sim.** No modo `workers` elas **não** rodam: N consumers não
+  devem disputar a tabela do goose no boot. O schema é do passo de deploy
+  (ou do `migrate` subcommand).
+
+**O que três binários custariam sem devolver nada:** três grafos Fx para
+manter em sincronia (com testes de paridade por grafo), três healthchecks,
+três conjuntos de config, e — o ponto decisivo — **a coordenação distribuída
+não desaparece**. Consumer e outbox relay já disputam work com
+`FOR UPDATE SKIP LOCKED` e o inbox é idempotente por `(consumer_name,
+message_id)`. Pôr cada um em seu processo mantém essa mesma coordenação, só que
+agora sobre a rede.
+
+**Quando separar de verdade (os gatilhos):** quando escalar junto passa a
+**causar dano mensurável** — um backlog de fila que exaure o pool e eleva o
+P99 da API (o que o modo `api` já resolve sem segundo binário), quando os dois
+lados precisam de **cadência de release diferente**, ou quando rodam em **nós
+distintos** por política de recursos. Nenhum desses justifica hoje 3 binários;
+todos são atendidos por `WALLET_MODE` + `--scale`.
+
+```sh
+# escala independente, uma dimensão por lado
+docker compose --profile split up -d --scale workers=4
+```
+
+**Prova de que funciona** (`make e2e SPLIT=1`, 25 testes, race detector):
+
+- `POST /wallets` no `api` (:8084) → **201**; no `workers` (:8085) → **404**;
+- `/health/live`, `/health/ready` e `/metrics` respondem nos **dois** modos;
+- uma BET enviada ao `api` é processada pelo processo **`workers`** — saldo
+  `50.00 → 38.00`, `version 1 → 2`, dois lançamentos no ledger e o evento
+  publicado na `integration-events.fifo` pelo outbox do outro processo;
+- o log do `api` tem `0` consumers iniciados; o log do `workers` tem o
+  consumer, o outbox e o reference resolver.
+
+```sh
+make e2e              # modo combinado (all)
+make e2e SPLIT=1      # api + workers como processos separados
+make e2e MULTI=1      # três apps combinados (concorrência distribuída)
 ```
 
 ### Variáveis de ambiente
@@ -264,6 +346,7 @@ Todas documentadas em [`.env.example`](.env.example). As principais:
 | `WALLET_AUTH_ISSUER` | Issuer OIDC validado no `iss` do token |
 | `WALLET_AUTH_JWKS_URL` | Override do JWKS (ambientes com hosts distintos) |
 | `WALLET_WORKERS_ENABLED` | Liga/desliga consumer, outbox e reference resolver |
+| `WALLET_MODE` | Papel do processo: `all` (padrão), `api` ou `workers` |
 | `WALLET_REFERENCE_TTL` / `WALLET_REFERENCE_MAX_ATTEMPTS` | Política de referências pendentes |
 | `WALLET_OTEL_ENABLED` | Liga o tracing (padrão `false`) |
 
@@ -343,6 +426,12 @@ provisionados com `allowUiUpdates: false`): *Wallet — Overview*,
 | `GET` | `/health/live` | Liveness (processo vivo) |
 | `GET` | `/health/ready` | Readiness (banco acessível) |
 | `GET` | `/metrics` | Métricas Prometheus |
+
+> [!NOTE]
+> Em `WALLET_MODE=workers` as rotas de **negócio** não são registradas: o
+> processo responde `/health/*` e `/metrics` (probes e scraping não dependem do
+> papel) e devolve `404` honesto para o resto, em vez de aceitar tráfego que
+> não deveria atender.
 
 ### Identidades de teste (Keycloak)
 

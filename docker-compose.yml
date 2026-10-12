@@ -144,6 +144,81 @@ services:
       - "8083:8080"
 
   # ---------------------------------------------------------------------------
+  # Split topology (profile "split"): the same image running two roles.
+  #
+  # Why a profile and not two binaries: the SQS consumer's parallelism is
+  # per-process (WALLET_CONSUMER_CONCURRENCY), so two replicas of a "workers"
+  # binary and two replicas of the combined binary give the same throughput.
+  # What actually differs is resource isolation — `api` gets the whole pgx
+  # pool (WALLET_DB_MAX_CONNS) for request handling, so a queue backlog can
+  # no longer starve HTTP connections on the shared pool.
+  #
+  #   docker compose --profile split up --build
+  #   api      :8084  WALLET_MODE=api      DB_MAX_CONNS=15  (latency-bound)
+  #   workers  :8085  WALLET_MODE=workers  DB_MAX_CONNS=5   (queue-bound)
+  #
+  # Scale each side on its own dimension:
+  #   docker compose --profile split up --scale workers=4
+  # ---------------------------------------------------------------------------
+  api:
+    profiles: ["split"]
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+    environment:
+      WALLET_MODE: api
+      WALLET_HTTP_ADDR: ":8080"
+      WALLET_DB_DSN: postgres://wallet:wallet@postgres:5432/wallet?sslmode=disable
+      WALLET_DB_MAX_CONNS: "15"
+      WALLET_SQS_ENDPOINT: http://localstack:4566
+      WALLET_AUTH_ISSUER: http://localhost:8080/realms/wallet
+      WALLET_AUTH_JWKS_URL: http://keycloak:8080/realms/wallet/protocol/openid-connect/certs
+      WALLET_MIGRATE_ON_START: "true"
+      WALLET_LOG_LEVEL: info
+      WALLET_OTEL_ENABLED: "${WALLET_OTEL_ENABLED:-false}"
+      WALLET_OTEL_ENDPOINT: otel-collector:4317
+      WALLET_OTEL_SERVICE_NAME: wallet-api
+      WALLET_ENV: local
+      WALLET_INSTANCE_ID: wallet-api-1
+    ports:
+      - "8084:8080"
+
+  workers:
+    profiles: ["split"]
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+    environment:
+      WALLET_MODE: workers
+      WALLET_HTTP_ADDR: ":8080"
+      WALLET_DB_DSN: postgres://wallet:wallet@postgres:5432/wallet?sslmode=disable
+      WALLET_DB_MAX_CONNS: "5"
+      WALLET_SQS_ENDPOINT: http://localstack:4566
+      WALLET_AUTH_ISSUER: http://localhost:8080/realms/wallet
+      WALLET_AUTH_JWKS_URL: http://keycloak:8080/realms/wallet/protocol/openid-connect/certs
+      # The schema is owned by the api/deploy step; N consumers must not race
+      # on the same goose table at startup.
+      WALLET_MIGRATE_ON_START: "false"
+      WALLET_LOG_LEVEL: info
+      WALLET_OTEL_ENABLED: "${WALLET_OTEL_ENABLED:-false}"
+      WALLET_OTEL_ENDPOINT: otel-collector:4317
+      WALLET_OTEL_SERVICE_NAME: wallet-workers
+      WALLET_ENV: local
+      WALLET_INSTANCE_ID: wallet-workers-1
+    ports:
+      - "8085:8080"
+
+  # ---------------------------------------------------------------------------
   # Observability stack (profile "observability").
   #
   # Off by default so the challenge's core `docker compose up` stays exactly

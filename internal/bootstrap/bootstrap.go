@@ -63,6 +63,12 @@ func newWagerService(
 //   - start: migrations → HTTP server → workers;
 //   - stop (reverse): workers drain → HTTP server stops accepting → pool
 //     closes last, after every consumer released it.
+//
+// App is one graph with three entry points (config.Mode): the modules are
+// always assembled, and the invokes decide what actually starts. Keeping a
+// single graph means one place to reason about ordering, one place to test
+// the wiring, and no drift between an "api" graph and a "workers" graph that
+// only differ by which invokes run.
 var App = fx.Options(
 	fx.Module("platform",
 		fx.Provide(func() context.Context { return context.Background() }),
@@ -112,7 +118,23 @@ var App = fx.Options(
 	fx.Invoke(registerHTTP),
 	// 3rd invoke: workers start last and stop first.
 	fx.Invoke(registerWorkers),
+
+	// 4th invoke (runs first, by list order): announce the effective topology.
+	fx.Invoke(registerMode),
 )
+
+// registerMode logs the resolved topology once, so every startup line says
+// which roles this process owns. Operationally this is the cheap half of the
+// argument for splitting binaries: `docker compose logs` tells you what a
+// replica is, and a mislabelled container is visible instead of inferred.
+func registerMode(cfg *config.Config, log *slog.Logger) {
+	log.Info("process mode resolved",
+		slog.String("mode", cfg.Mode.String()),
+		slog.Bool("http_business_routes", cfg.Mode.ServesBusinessRoutes()),
+		slog.Bool("workers", cfg.Mode.RunsWorkers(cfg.WorkersEnabled)),
+		slog.Int("db_max_conns", int(cfg.DBMaxConns)),
+	)
+}
 
 func registerPoolClose(lc fx.Lifecycle, pool *pgxpool.Pool, log *slog.Logger) {
 	lc.Append(fx.Hook{
@@ -125,7 +147,13 @@ func registerPoolClose(lc fx.Lifecycle, pool *pgxpool.Pool, log *slog.Logger) {
 }
 
 func registerMigrations(lc fx.Lifecycle, cfg *config.Config, log *slog.Logger) {
-	if !cfg.MigrateOnStart {
+	// A workers-only process never migrates: schema changes belong to the
+	// deploy step (one replica, or the migrate subcommand), not to N consumers
+	// racing each other on the same goose table at startup.
+	if !cfg.MigrateOnStart || cfg.Mode == config.ModeWorkers {
+		if cfg.MigrateOnStart {
+			log.Info("migrations skipped in workers mode")
+		}
 		return
 	}
 	lc.Append(fx.Hook{
@@ -164,8 +192,12 @@ func registerHTTP(lc fx.Lifecycle, cfg *config.Config, log *slog.Logger, srv *ht
 func registerWorkers(lc fx.Lifecycle, cfg *config.Config, log *slog.Logger,
 	ow *messaging.OutboxWorker, rw *messaging.ReferenceWorker, cons *messaging.Consumer,
 ) {
-	if !cfg.WorkersEnabled {
-		log.Info("workers disabled by configuration")
+	if !cfg.Mode.RunsWorkers(cfg.WorkersEnabled) {
+		if cfg.Mode == config.ModeAPI {
+			log.Info("workers disabled by mode", slog.String("mode", cfg.Mode.String()))
+		} else {
+			log.Info("workers disabled by configuration")
+		}
 		return
 	}
 	var cancel context.CancelFunc
