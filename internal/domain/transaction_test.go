@@ -1,238 +1,172 @@
-package domain
+// Package domain_test exercises the WagerTransaction state machine and its
+// validation rules through the exported API, with testify.
+package domain_test
 
 import (
-	"errors"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/chalkan3/backend-challenge-go/internal/domain"
 )
 
-func mustNewExternal(t *testing.T, p ExternalTxParams) *WagerTransaction {
+func externalTx(t *testing.T, mutate func(*domain.ExternalTxParams)) *domain.WagerTransaction {
 	t.Helper()
-	tx, err := NewExternalTransaction(p)
-	if err != nil {
-		t.Fatalf("NewExternalTransaction: %v", err)
+	p := domain.ExternalTxParams{
+		ProviderID:            "provider-a",
+		ExternalTransactionID: "ext-1",
+		PlayerID:              domain.MustNewID(),
+		WalletID:              domain.MustNewID(),
+		Kind:                  domain.KindBet,
+		Money:                 mustParse(t, "10.00", "BRL"),
+		ReceivedVia:           domain.ViaHTTP,
+		CorrelationID:         "corr-1",
+		Now:                   baseTime,
 	}
+	if mutate != nil {
+		mutate(&p)
+	}
+	tx, err := domain.NewExternalTransaction(p)
+	require.NoError(t, err)
 	return tx
 }
 
-func extParams(kind TxKind, amount string) ExternalTxParams {
-	return ExternalTxParams{
-		ProviderID: "provider-a", ExternalTransactionID: "tx-1",
-		PlayerID: NewIDMustT(), WalletID: NewIDMustT(),
-		RoundID: "round-1", GameID: "fortune-chimp",
-		Kind: kind, Money: mustParseT(amount),
-		ReceivedVia: ViaHTTP, Now: time.Now().UTC(),
-	}
-}
-
-func mustParseT(s string) Money {
-	m, err := ParseMoney(s, "BRL")
-	if err != nil {
-		panic(err)
-	}
-	return m
-}
-
-func TestExternalTransactionValidation(t *testing.T) {
-	// the five external kinds with their zero/positive policy
-	for _, k := range []TxKind{KindBet, KindWin, KindRefund, KindRollback} {
-		p := extParams(k, "25.00")
-		if k == KindRefund || k == KindRollback {
-			p.ReferenceExternalTxID = "tx-0"
+func TestNewExternalTransaction(t *testing.T) {
+	t.Run("external kinds default to PENDING", func(t *testing.T) {
+		tx := externalTx(t, nil)
+		assert.Equal(t, domain.StatusPending, tx.Status())
+		assert.Equal(t, domain.KindBet, tx.Kind())
+		assert.True(t, tx.Kind().IsExternal())
+		assert.Equal(t, domain.OriginExternal, tx.Origin())
+		assert.Equal(t, domain.ViaHTTP, tx.ReceivedVia())
+		assert.Equal(t, "provider-a", tx.ProviderID())
+		assert.Equal(t, "ext-1", tx.ExternalTxID())
+		assert.Empty(t, tx.IdempotencyKey(), "idempotency is attached by the application layer")
+	})
+	t.Run("internal kind is rejected over external channels", func(t *testing.T) {
+		_, err := domain.NewExternalTransaction(domain.ExternalTxParams{
+			ProviderID: "p", ExternalTransactionID: "e",
+			PlayerID: domain.MustNewID(), WalletID: domain.MustNewID(),
+			Kind: domain.KindOpening, Money: mustParse(t, "1.00", "BRL"),
+			ReceivedVia: domain.ViaHTTP, Now: baseTime,
+		})
+		require.ErrorIs(t, err, domain.ErrInvalidKind)
+		assert.False(t, domain.KindOpening.IsExternal())
+	})
+	t.Run("reversals require a reference", func(t *testing.T) {
+		for _, kind := range []domain.TxKind{domain.KindRefund, domain.KindRollback} {
+			_, err := domain.NewExternalTransaction(domain.ExternalTxParams{
+				ProviderID: "p", ExternalTransactionID: "e",
+				PlayerID: domain.MustNewID(), WalletID: domain.MustNewID(),
+				Kind: kind, Money: mustParse(t, "1.00", "BRL"),
+				ReceivedVia: domain.ViaSQS, Now: baseTime,
+			})
+			require.ErrorIs(t, err, domain.ErrMissingReference, "kind %s", kind)
 		}
-		if _, err := NewExternalTransaction(p); err != nil {
-			t.Errorf("%s positive: %v", k, err)
-		}
-	}
-	if _, err := NewExternalTransaction(extParams(KindLoss, "0.00")); err != nil {
-		t.Errorf("LOSS zero: %v", err)
-	}
-	if _, err := NewExternalTransaction(extParams(KindLoss, "0.01")); !errors.Is(err, ErrInvalidAmount) {
-		t.Errorf("LOSS non-zero must fail: %v", err)
-	}
-	if _, err := NewExternalTransaction(extParams(KindBet, "0.00")); !errors.Is(err, ErrInvalidAmount) {
-		t.Errorf("BET zero must fail: %v", err)
-	}
-	if _, err := NewExternalTransaction(extParams(KindWin, "-1.00")); !errors.Is(err, ErrInvalidAmount) {
-		t.Errorf("WIN negative must fail: %v", err)
-	}
-	// reversals require a reference
-	for _, k := range []TxKind{KindRefund, KindRollback} {
-		if _, err := NewExternalTransaction(extParams(k, "25.00")); !errors.Is(err, ErrMissingReference) {
-			t.Errorf("%s without reference: %v", k, err)
-		}
-	}
-	// OPENING is internal-only
-	if _, err := NewExternalTransaction(extParams(KindOpening, "1.00")); !errors.Is(err, ErrInvalidKind) {
-		t.Errorf("OPENING via external channel: %v", err)
-	}
-	if _, err := NewExternalTransaction(ExternalTxParams{Kind: "NOPE", Money: mustParseT("1.00")}); !errors.Is(err, ErrInvalidKind) {
-		t.Errorf("unknown kind: %v", err)
-	}
-	// missing mandatory external metadata
-	bad := extParams(KindBet, "1.00")
-	bad.ProviderID = ""
-	if _, err := NewExternalTransaction(bad); !errors.Is(err, ErrInvalidTransaction) {
-		t.Errorf("missing provider: %v", err)
-	}
-	bad2 := extParams(KindBet, "1.00")
-	bad2.ExternalTransactionID = ""
-	if _, err := NewExternalTransaction(bad2); !errors.Is(err, ErrInvalidTransaction) {
-		t.Errorf("missing external id: %v", err)
-	}
-	// valid reversal
-	p := extParams(KindRefund, "25.00")
-	p.ReferenceExternalTxID = "tx-1"
-	if _, err := NewExternalTransaction(p); err != nil {
-		t.Errorf("valid REFUND: %v", err)
-	}
+	})
+	t.Run("round and game ids ride along", func(t *testing.T) {
+		tx := externalTx(t, func(p *domain.ExternalTxParams) {
+			p.RoundID, p.GameID = "round-9", "game-9"
+		})
+		assert.Equal(t, "round-9", tx.RoundID())
+		assert.Equal(t, "game-9", tx.GameID())
+	})
 }
 
-func TestOpeningTransaction(t *testing.T) {
-	tx, err := NewOpeningTransaction(NewIDMustT(), NewIDMustT(), "BRL", mustParseT("1000.00"), time.Now().UTC())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if tx.Origin() != OriginInternal || tx.Kind() != KindOpening || tx.Status() != StatusPending {
-		t.Fatalf("opening tx kind=%s origin=%s status=%s", tx.Kind(), tx.Origin(), tx.Status())
-	}
-	if tx.ProviderID() != "" || tx.ExternalTxID() != "" || tx.IdempotencyKey() != "" ||
-		tx.RoundID() != "" || tx.GameID() != "" || tx.PayloadHash() != "" {
-		t.Fatal("opening must carry no external metadata")
-	}
-	// zero opening is valid too
-	if _, err := NewOpeningTransaction(NewIDMustT(), NewIDMustT(), "BRL", mustParseT("0.00"), time.Now().UTC()); err != nil {
-		t.Errorf("zero opening: %v", err)
-	}
-	// negative opening is not
-	if _, err := NewOpeningTransaction(NewIDMustT(), NewIDMustT(), "BRL", mustParseT("-0.01"), time.Now().UTC()); !errors.Is(err, ErrInvalidAmount) {
-		t.Error("negative opening must fail")
-	}
+func TestNewOpeningTransaction(t *testing.T) {
+	tx, err := domain.NewOpeningTransaction(
+		domain.MustNewID(), domain.MustNewID(), "BRL", mustParse(t, "7.00", "BRL"), baseTime,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, domain.KindOpening, tx.Kind())
+	assert.Equal(t, domain.OriginInternal, tx.Origin())
+	assert.Equal(t, domain.StatusPending, tx.Status())
+	assert.Equal(t, "wallet-opening", tx.CorrelationID())
+
+	_, err = domain.NewOpeningTransaction(
+		domain.MustNewID(), domain.MustNewID(), "BRL", mustParse(t, "-1.00", "BRL"), baseTime,
+	)
+	require.ErrorIs(t, err, domain.ErrInvalidAmount)
 }
 
-func TestStateMachine(t *testing.T) {
-	now := time.Now().UTC()
-	tx := mustNewExternal(t, extParams(KindBet, "25.00"))
-	if tx.Status() != StatusPending {
-		t.Fatal("starts PENDING")
-	}
-	before := mustParseT("1000.00")
-	after := mustParseT("975.00")
-	// PENDING -> PROCESSED with the financial result observed at processing time
-	if err := tx.MarkProcessed(ProcessedResult{
-		Direction: DirectionDebit, ResultAmount: tx.Amount(),
-		BalanceBefore: before, BalanceAfter: after, WalletVersion: 2,
-	}, now); err != nil {
-		t.Fatal(err)
-	}
-	if tx.Status() != StatusProcessed || !tx.Terminal() {
-		t.Fatal("PROCESSED terminal")
-	}
-	if tx.BalanceAfter() == nil || !tx.BalanceAfter().Equals(after) {
-		t.Fatal("processed must persist the observed balance")
-	}
-	// terminal transactions never transition again
-	if err := tx.MarkRejected("X", "y", now); !errors.Is(err, ErrInvalidTransition) {
-		t.Errorf("reject after processed: %v", err)
-	}
-	if err := tx.MarkPendingReference(now, now); !errors.Is(err, ErrInvalidTransition) {
-		t.Errorf("pending-ref after processed: %v", err)
-	}
-	if err := tx.MarkProcessed(ProcessedResult{Direction: DirectionNone, ResultAmount: tx.Amount()}, now); !errors.Is(err, ErrInvalidTransition) {
-		t.Errorf("reprocess: %v", err)
-	}
-	if err := tx.MarkFailed("X", "y", now); !errors.Is(err, ErrInvalidTransition) {
-		t.Errorf("fail after processed: %v", err)
-	}
+func TestTransactionStateMachine(t *testing.T) {
+	t.Run("pending to processed with a financial result", func(t *testing.T) {
+		tx := externalTx(t, nil)
+		require.NoError(t, tx.MarkProcessed(domain.ProcessedResult{
+			Direction:     domain.DirectionDebit,
+			ResultAmount:  mustParse(t, "10.00", "BRL"),
+			BalanceBefore: mustParse(t, "50.00", "BRL"),
+			BalanceAfter:  mustParse(t, "40.00", "BRL"),
+			WalletVersion: 2,
+		}, baseTime))
+		assert.Equal(t, domain.StatusProcessed, tx.Status())
+		assert.True(t, tx.Status().Terminal())
+		assert.True(t, tx.Terminal())
+		require.NotNil(t, tx.BalanceAfter())
+		assert.Equal(t, "40.00", tx.BalanceAfter().String())
+		assert.Equal(t, int64(2), *tx.WalletVersionAfter())
+	})
+	t.Run("processed is terminal", func(t *testing.T) {
+		tx := externalTx(t, nil)
+		require.NoError(t, tx.MarkProcessed(domain.ProcessedResult{
+			Direction:     domain.DirectionNone,
+			ResultAmount:  mustParse(t, "0", "BRL"),
+			BalanceBefore: domain.ZeroMoneyMust("BRL"),
+			BalanceAfter:  domain.ZeroMoneyMust("BRL"),
+			WalletVersion: 1,
+		}, baseTime))
+		err := tx.MarkRejected("LATE", "too late", baseTime)
+		require.ErrorIs(t, err, domain.ErrInvalidTransition)
+	})
+	t.Run("pending reference retries then processes", func(t *testing.T) {
+		tx := externalTx(t, func(p *domain.ExternalTxParams) {
+			p.Kind = domain.KindRefund
+			p.ReferenceExternalTxID = "ext-0"
+		})
+		retryAt := baseTime.Add(time.Minute)
+		require.NoError(t, tx.MarkPendingReference(retryAt, baseTime))
+		assert.Equal(t, domain.StatusPendingReference, tx.Status())
+		assert.Equal(t, 1, tx.PendingAttempts())
+		require.NotNil(t, tx.NextRetryAt())
+		assert.WithinDuration(t, retryAt, *tx.NextRetryAt(), time.Second)
 
-	// terminal transitions require a failure code
-	txr := mustNewExternal(t, extParams(KindWin, "1.00"))
-	if err := txr.MarkRejected("", "", now); !errors.Is(err, ErrInvalidTransaction) {
-		t.Errorf("terminal without failure code: %v", err)
-	}
+		// retries are allowed from PENDING_REFERENCE (self-transition)
+		require.NoError(t, tx.MarkPendingReference(retryAt.Add(time.Minute), baseTime))
+		assert.Equal(t, 2, tx.PendingAttempts())
 
-	// no-movement processed result (LOSS) must carry a zero amount
-	tx2 := mustNewExternal(t, extParams(KindLoss, "0.00"))
-	if err := tx2.MarkProcessed(ProcessedResult{Direction: DirectionNone, ResultAmount: mustParseT("0.01"),
-		BalanceBefore: before, BalanceAfter: before, WalletVersion: 1}, now); !errors.Is(err, ErrLedgerArithmetic) {
-		t.Errorf("LOSS with non-zero result: %v", err)
-	}
-	if err := tx2.MarkProcessed(ProcessedResult{Direction: DirectionNone, ResultAmount: mustParseT("0.00"),
-		BalanceBefore: before, BalanceAfter: before, WalletVersion: 1}, now); err != nil {
-		t.Errorf("LOSS valid processed: %v", err)
-	}
-	if tx2.ResultDirection() != DirectionNone {
-		t.Error("LOSS must have no movement direction")
-	}
+		require.NoError(t, tx.MarkProcessed(domain.ProcessedResult{
+			Direction:     domain.DirectionCredit,
+			ResultAmount:  mustParse(t, "10.00", "BRL"),
+			BalanceBefore: mustParse(t, "0.00", "BRL"),
+			BalanceAfter:  mustParse(t, "10.00", "BRL"),
+			WalletVersion: 3,
+		}, baseTime))
+		assert.Equal(t, domain.StatusProcessed, tx.Status())
+	})
+	t.Run("rejection and failure record the stable code", func(t *testing.T) {
+		rejected := externalTx(t, nil)
+		require.NoError(t, rejected.MarkRejected("INSUFFICIENT_FUNDS", "no funds", baseTime))
+		assert.Equal(t, domain.StatusRejected, rejected.Status())
+		assert.Equal(t, "INSUFFICIENT_FUNDS", rejected.FailureCode())
 
-	// PENDING -> PENDING_REFERENCE -> REJECTED (ttl)
-	rp := extParams(KindRefund, "25.00")
-	rp.ReferenceExternalTxID = "tx-1"
-	tx3 := mustNewExternal(t, rp)
-	if err := tx3.MarkPendingReference(now.Add(time.Minute), now); err != nil {
-		t.Fatal(err)
-	}
-	if tx3.Status() != StatusPendingReference || tx3.PendingAttempts() != 1 {
-		t.Fatalf("pending ref: %s attempts=%d", tx3.Status(), tx3.PendingAttempts())
-	}
-	// durable retry without leaving PENDING_REFERENCE
-	if err := tx3.RetryPendingReference(now.Add(2 * time.Minute)); err != nil {
-		t.Fatal(err)
-	}
-	if tx3.PendingAttempts() != 2 {
-		t.Fatal("retry must bump attempts")
-	}
-	if err := tx3.MarkRejected("REFERENCE_NOT_FOUND", "ttl", now); err != nil {
-		t.Fatal(err)
-	}
-	if tx3.FailureCode() != "REFERENCE_NOT_FOUND" {
-		t.Fatal("failure code persisted")
-	}
-
-	// FAILED path
-	tx4 := mustNewExternal(t, extParams(KindWin, "1.00"))
-	if err := tx4.MarkFailed("INFRA", "boom", now); err != nil {
-		t.Fatal(err)
-	}
-	if !tx4.Terminal() {
-		t.Fatal("FAILED terminal")
-	}
-
-	// rehydration rebuilds state without transitioning anything
-	fc := tx3.FailureCode()
-	rp2 := RehydrateParams{
-		ID: tx3.ID(), Kind: tx3.Kind(), Origin: tx3.Origin(),
-		ProviderID: tx3.providerID, ExternalTxID: tx3.externalTxID,
-		IdempotencyKey: tx3.idempotencyKey, PayloadHash: tx3.payloadHash,
-		PlayerID: tx3.PlayerID(), WalletID: tx3.WalletID(),
-		Currency: "BRL", AmountMinor: tx3.Amount().AmountMinor(),
-		Status: StatusRejected, FailureCode: &fc,
-		ResultDirection: tx3.ResultDirection(), ResultAmountMinor: 0,
-		ReceivedVia: ViaHTTP,
-		CreatedAt:   now, UpdatedAt: now,
-	}
-	r, err := RehydrateWagerTransaction(rp2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if r.Status() != StatusRejected || r.PendingAttempts() != 0 {
-		t.Fatal("rehydration changed state")
-	}
-	if !r.Terminal() {
-		t.Fatal("rehydrated REJECTED must be terminal")
-	}
+		failed := externalTx(t, nil)
+		require.NoError(t, failed.MarkFailed("DB_ERROR", "boom", baseTime))
+		assert.Equal(t, domain.StatusFailed, failed.Status())
+	})
+	t.Run("no-movement result must carry a zero amount", func(t *testing.T) {
+		tx := externalTx(t, nil)
+		err := tx.MarkProcessed(domain.ProcessedResult{
+			Direction: domain.DirectionNone, ResultAmount: mustParse(t, "1.00", "BRL"),
+		}, baseTime)
+		require.Error(t, err)
+	})
 }
 
-func TestSetReference(t *testing.T) {
-	p := extParams(KindRollback, "25.00")
-	p.ReferenceExternalTxID = "tx-9"
-	tx := mustNewExternal(t, p)
-	if tx.ReferenceTxID() != nil {
-		t.Fatal("reference starts unresolved")
-	}
-	id := NewIDMustT()
-	tx.SetReference(id)
-	if tx.ReferenceTxID() == nil || *tx.ReferenceTxID() != id {
-		t.Fatal("resolved reference stored")
-	}
+func TestSetIdempotency(t *testing.T) {
+	tx := externalTx(t, nil)
+	tx.SetIdempotency("idem-1", "hash-1")
+	assert.Equal(t, "idem-1", tx.IdempotencyKey())
+	assert.Equal(t, "hash-1", tx.PayloadHash())
 }

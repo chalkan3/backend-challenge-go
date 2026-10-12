@@ -16,27 +16,44 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/fx"
 
-	"github.com/chalkan3/backend-challenge-go/internal/app"
-	"github.com/chalkan3/backend-challenge-go/internal/infra/auth"
-	"github.com/chalkan3/backend-challenge-go/internal/infra/postgres"
-	"github.com/chalkan3/backend-challenge-go/internal/infra/sqs"
+	"github.com/chalkan3/backend-challenge-go/internal/auth"
+	"github.com/chalkan3/backend-challenge-go/internal/messaging"
 	"github.com/chalkan3/backend-challenge-go/internal/platform/config"
 	"github.com/chalkan3/backend-challenge-go/internal/platform/logging"
 	"github.com/chalkan3/backend-challenge-go/internal/platform/metrics"
-	"github.com/chalkan3/backend-challenge-go/internal/transport/httpapi"
-	"github.com/chalkan3/backend-challenge-go/internal/worker"
+	"github.com/chalkan3/backend-challenge-go/internal/postgres"
+	"github.com/chalkan3/backend-challenge-go/internal/service"
+	"github.com/chalkan3/backend-challenge-go/internal/sqs"
+	wallethttp "github.com/chalkan3/backend-challenge-go/internal/transport/http"
 )
 
 // NewHTTPDeps assembles the transport dependencies.
 func NewHTTPDeps(
 	cfg *config.Config, log *slog.Logger, a *auth.Authenticator,
-	ws *app.WalletService, wg *app.WagerService, m *metrics.Metrics,
+	ws *service.WalletService, wg *service.WagerService, m *metrics.Metrics,
 	pool *pgxpool.Pool, client *awssqs.Client, urls sqs.QueueURLs,
-) httpapi.Deps {
-	return httpapi.Deps{
+) wallethttp.Deps {
+	return wallethttp.Deps{
 		Cfg: cfg, Log: log.With(slog.String("component", "http")), Auth: a,
-		Ep: httpapi.NewEndpoints(ws, wg, m), Pool: pool, SQS: client, URLs: urls, Reg: m.Registry(),
+		Ep: wallethttp.NewEndpoints(ws, wg, m), Pool: pool, SQS: client, URLs: urls, Reg: m.Registry(),
 	}
+}
+
+// newWalletService adapts the functional-options constructor to Fx: the
+// composition root reads configuration once here, and the use case only
+// receives plain values (dependency injection at the boundary).
+func newWalletService(
+	txm service.TxManager, log *slog.Logger, hook service.Instrumentation, cfg *config.Config,
+) *service.WalletService {
+	return service.NewWalletService(txm, log, hook, service.WithLedgerPageSize(cfg.LedgerPageMax))
+}
+
+// newWagerService adapts the functional-options constructor to Fx.
+func newWagerService(
+	txm service.TxManager, log *slog.Logger, hook service.Instrumentation, cfg *config.Config,
+) *service.WagerService {
+	return service.NewWagerService(txm, log, hook,
+		service.WithReferencePolicy(cfg.ReferenceMaxAttempts, cfg.ReferenceTTL))
 }
 
 // App is the full Fx application option set. Lifecycle rules:
@@ -50,15 +67,15 @@ var App = fx.Options(
 		fx.Provide(logging.New),
 		fx.Provide(metrics.New),
 		fx.Provide(
-			fx.Annotate(newInstrumentation, fx.As(new(app.Instrumentation))),
-			fx.Annotate(newInstrumentation, fx.As(new(worker.Instrumentation))),
-			fx.Annotate(newInstrumentation, fx.As(new(worker.ConsumerMetrics))),
+			fx.Annotate(newInstrumentation, fx.As(new(service.Instrumentation))),
+			fx.Annotate(newInstrumentation, fx.As(new(messaging.Instrumentation))),
+			fx.Annotate(newInstrumentation, fx.As(new(messaging.ConsumerMetrics))),
 		),
 	),
 	fx.Module("auth", fx.Provide(auth.NewAuthenticator)),
 	fx.Module("postgres",
 		fx.Provide(postgres.NewPool),
-		fx.Provide(fx.Annotate(postgres.NewStore, fx.As(new(app.TxManager)))),
+		fx.Provide(fx.Annotate(postgres.NewStore, fx.As(new(service.TxManager)))),
 	),
 	fx.Module("sqs",
 		fx.Provide(sqs.NewClient),
@@ -66,21 +83,17 @@ var App = fx.Options(
 		fx.Provide(sqs.NewPublisher),
 	),
 	fx.Module("usecases",
-		fx.Provide(
-			fx.Annotate(func(cfg *config.Config) app.LedgerConfigSource { return cfg }),
-			fx.Annotate(func(cfg *config.Config) app.ReferenceConfigSource { return cfg }),
-		),
-		fx.Provide(app.NewWalletService),
-		fx.Provide(app.NewWagerService),
+		fx.Provide(newWalletService),
+		fx.Provide(newWagerService),
 	),
 	fx.Module("http",
 		fx.Provide(NewHTTPDeps),
-		fx.Provide(httpapi.NewServer),
+		fx.Provide(wallethttp.NewServer),
 	),
 	fx.Module("workers",
-		fx.Provide(worker.NewOutboxWorker),
-		fx.Provide(worker.NewReferenceWorker),
-		fx.Provide(worker.NewConsumer),
+		fx.Provide(messaging.NewOutboxWorker),
+		fx.Provide(messaging.NewReferenceWorker),
+		fx.Provide(messaging.NewConsumer),
 	),
 	// 1st invoke: pool closes LAST (OnStop runs in reverse append order).
 	fx.Invoke(registerPoolClose),
@@ -139,7 +152,7 @@ func registerHTTP(lc fx.Lifecycle, cfg *config.Config, log *slog.Logger, srv *ht
 }
 
 func registerWorkers(lc fx.Lifecycle, cfg *config.Config, log *slog.Logger,
-	ow *worker.OutboxWorker, rw *worker.ReferenceWorker, cons *worker.Consumer,
+	ow *messaging.OutboxWorker, rw *messaging.ReferenceWorker, cons *messaging.Consumer,
 ) {
 	if !cfg.WorkersEnabled {
 		log.Info("workers disabled by configuration")

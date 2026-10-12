@@ -2,6 +2,54 @@
 
 Decisões de arquitetura do desafio, organizadas pelos tópicos exigidos.
 
+## 0. Layout e padrões de design
+
+Layout hexagonal (ports & adapters), com pacotes nomeados no estilo da
+comunidade Go e vocabulário do go-kit:
+
+| Pacote | Responsabilidade |
+| --- | --- |
+| `internal/domain` | Modelo puro: `Money` (value object), `Wallet` (aggregate root), `WagerTransaction` (máquina de estados), `LedgerEntry`, envelopes de eventos, erros com código estável |
+| `internal/service` | Casos de uso + **ports** (`ports.go`: repositórios, `TxManager`, `Instrumentation`) e erros classificados |
+| `internal/transport/http` | go-kit: `Endpoints`, decoders/encoders, error encoder, middlewares de endpoint e de rede |
+| `internal/messaging` | Workers de fundo: consumer SQS (inbox), outbox relay, reference resolver |
+| `internal/postgres` | Adapter pgx: pool, migrations goose, repositórios, store (unit of work) |
+| `internal/sqs` | Adapter SQS: client e publisher da outbox |
+| `internal/auth` | Adapter OIDC (jwx + JWKS): `Principal`, validação de tokens |
+| `internal/platform/{config,logging,metrics}` | Cross-cutting: configuração validada, slog JSON, métricas **kit/metrics** sobre Prometheus |
+| `internal/bootstrap` | Composition root: `fx.Module` por camada + adapter de instrumentação (ports → métricas) |
+| `test/integration` | Suíte `-tags=integration` contra Postgres/Keycloak/LocalStack reais |
+
+Padrões de design explícitos:
+
+- **Ports & Adapters (hexagonal)** — domínio no centro; driving adapter HTTP,
+  driven adapters postgres/sqs/auth; ports definidos no lado do serviço.
+- **Repository** — `WalletRepository`, `TransactionRepository`,
+  `LedgerRepository`, `InboxRepository`, `OutboxRepository`.
+- **Unit of Work** — `TxManager.WithinTx`: toda escrita financeira (linhas de
+  domínio + ledger + inbox + outbox) em uma única transação SQL.
+- **Decorator** — endpoint middlewares (`authorize`, `instrument`), middlewares
+  de rede (`auth`, `logRequests`), workers empilhados por composição.
+- **Strategy** — dispatch por `TxKind` (`WagerService.strategies`): o pipeline
+  compartilhado (idempotência, lock da carteira, persistência) fica livre de
+  condicionais por tipo.
+- **State** — máquina de estados documentada (`allowedTransitions`) com
+  transições validadas no agregado.
+- **Observer** — port `Instrumentation`/`ConsumerMetrics`: casos de uso e
+  workers publicam resultados sem conhecer métricas.
+- **Adapter** — `bootstrap/instrumentation.go` (ports → kit/metrics);
+  pgx/SQS/OIDC adaptados aos ports.
+- **Factory Method** — construtores de eventos de integração, rotas HTTP
+  declarativas, helpers de métricas.
+- **Functional Options** — `WithReferencePolicy`, `WithLedgerPageSize`;
+  configuração entra no caso de uso como valor simples, injetada pelo
+  composition root.
+- **Value Object / Aggregate (DDD)** — `Money` imutável; `Wallet` só muda via
+  `Credit`/`Debit`, que preservam os invariantes e produzem `Movement`.
+
+Testes unitários usam **testify** com fakes dos ports (substituibilidade da
+arquitetura), table-driven e sem I/O.
+
 ## 1. Composição (Uber Fx) e go-kit
 
 - `internal/bootstrap` monta a aplicação com `fx.Module` por camada:
@@ -19,7 +67,7 @@ Decisões de arquitetura do desafio, organizadas pelos tópicos exigidos.
   HTTP; `kit/metrics` publica Prometheus. O `main` é
   `fx.New(bootstrap.App).Run()` — não há lógica no main.
 - O domínio (`internal/domain`) não importa Fx, HTTP, SQS nem pgx. A camada
-  de aplicação (`internal/app`) só conhece as portas (`ports.go`) e o
+  de aplicação (`internal/service`) só conhece as portas (`ports.go`) e o
   domínio.
 
 ## 2. Dinheiro (`Money`)

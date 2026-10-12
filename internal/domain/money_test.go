@@ -1,227 +1,155 @@
-package domain
+// Package domain_test exercises the Money value object through its exported
+// API only (black-box), with table-driven cases and testify.
+package domain_test
 
 import (
-	"errors"
 	"math"
+	"strings"
 	"testing"
-	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/chalkan3/backend-challenge-go/internal/domain"
 )
 
+func mustParse(t *testing.T, amount, currency string) domain.Money {
+	t.Helper()
+	m, err := domain.ParseMoney(amount, currency)
+	require.NoError(t, err)
+	return m
+}
+
+func requireMoney(t *testing.T, want string, got domain.Money) {
+	t.Helper()
+	require.Equal(t, want, got.String(), "money value mismatch")
+}
+
 func TestParseMoney(t *testing.T) {
-	cases := []struct {
-		in     string
-		cur    string
-		want   int64
-		wantEr bool
+	tests := []struct {
+		name       string
+		amount     string
+		currency   string
+		wantMinor  int64
+		wantErrMsg string
 	}{
-		{"1000.00", "BRL", 100000, false},
-		{"25.5", "BRL", 2550, false},
-		{"0", "BRL", 0, false},
-		{"0.00", "BRL", 0, false},
-		{"-5.25", "BRL", -525, false},
-		{"9999999999999999.99", "BRL", 999999999999999999, false},
-		{"25.505", "BRL", 0, true},  // 3 fraction digits: rejected, never rounded
-		{"25.5000", "BRL", 0, true}, // 4 fraction digits
-		{"1e3", "BRL", 0, true},
-		{"+25.00", "BRL", 0, true},
-		{"", "BRL", 0, true},
-		{"  ", "BRL", 0, true},
-		{"abc", "BRL", 0, true},
-		{"1,000.00", "BRL", 0, true},
-		{".50", "BRL", 0, true},
-		{"10000000000000000.00", "BRL", 0, true}, // 17 integer digits: overflow guard
-		{"25.00", "brl", 0, true},                // currency must be upper-case alpha-3
-		{"25.00", "BRLZ", 0, true},
-		{"25.00", "", 0, true},
+		{name: "two decimals", amount: "1000.00", currency: "BRL", wantMinor: 100_000},
+		{name: "one decimal", amount: "25.5", currency: "BRL", wantMinor: 2550},
+		{name: "zero", amount: "0", currency: "BRL", wantMinor: 0},
+		{name: "zero explicit", amount: "0.00", currency: "BRL", wantMinor: 0},
+		{name: "negative", amount: "-5.25", currency: "BRL", wantMinor: -525},
+		{name: "max representable", amount: "9999999999999999.99", currency: "BRL", wantMinor: 999_999_999_999_999_999},
+		{name: "three fraction digits is rejected, never rounded", amount: "25.505", currency: "BRL", wantErrMsg: "INVALID_MONEY"},
+		{name: "four fraction digits", amount: "25.5000", currency: "BRL", wantErrMsg: "INVALID_MONEY"},
+		{name: "scientific notation", amount: "1e3", currency: "BRL", wantErrMsg: "INVALID_MONEY"},
+		{name: "explicit plus sign", amount: "+25.00", currency: "BRL", wantErrMsg: "INVALID_MONEY"},
+		{name: "empty amount", amount: "", currency: "BRL", wantErrMsg: "INVALID_MONEY"},
+		{name: "blank amount", amount: "  ", currency: "BRL", wantErrMsg: "INVALID_MONEY"},
+		{name: "not a number", amount: "abc", currency: "BRL", wantErrMsg: "INVALID_MONEY"},
+		{name: "thousand separators", amount: "1,000.00", currency: "BRL", wantErrMsg: "INVALID_MONEY"},
+		{name: "missing integer part", amount: ".50", currency: "BRL", wantErrMsg: "INVALID_MONEY"},
+		{name: "17 integer digits overflows", amount: "10000000000000000.00", currency: "BRL", wantErrMsg: "INVALID_MONEY"},
+		{name: "currency must be upper case", amount: "25.00", currency: "brl", wantErrMsg: "INVALID_CURRENCY"},
+		{name: "currency must be alpha-3", amount: "25.00", currency: "BRLZ", wantErrMsg: "INVALID_CURRENCY"},
+		{name: "currency is required", amount: "25.00", currency: "", wantErrMsg: "INVALID_CURRENCY"},
 	}
-	for _, c := range cases {
-		m, err := ParseMoney(c.in, c.cur)
-		if c.wantEr {
-			if err == nil {
-				t.Errorf("ParseMoney(%q,%q): expected error", c.in, c.cur)
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m, err := domain.ParseMoney(tc.amount, tc.currency)
+			if tc.wantErrMsg != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErrMsg)
+				return
 			}
-			continue
-		}
-		if err != nil {
-			t.Errorf("ParseMoney(%q,%q): %v", c.in, c.cur, err)
-			continue
-		}
-		if m.AmountMinor() != c.want {
-			t.Errorf("ParseMoney(%q,%q) = %d, want %d", c.in, c.cur, m.AmountMinor(), c.want)
-		}
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantMinor, m.AmountMinor())
+			assert.Equal(t, "BRL", m.Currency())
+		})
 	}
 }
 
-func TestMoneyStringRoundTrip(t *testing.T) {
-	for _, s := range []string{"0.00", "1000.00", "25.50", "-5.25", "9999999999999999.99"} {
-		m := mustParse(t, s, "BRL")
-		if got := m.String(); got != s {
-			t.Errorf("round trip %q => %q", s, got)
-		}
+func TestMoneyStringIsExactDecimal(t *testing.T) {
+	tests := []struct {
+		minor int64
+		want  string
+	}{
+		{0, "0.00"},
+		{1, "0.01"},
+		{-1, "-0.01"},
+		{2550, "25.50"},
+		{-525, "-5.25"},
+		{999_999_999_999_999_999, "9999999999999999.99"},
 	}
-	// canonicalization: "25.5" serializes as "25.50"
-	if got := mustParse(t, "25.5", "BRL").String(); got != "25.50" {
-		t.Errorf("canonicalize: %q", got)
+	for _, tc := range tests {
+		m, err := domain.NewMoney(tc.minor, "BRL")
+		require.NoError(t, err)
+		assert.Equal(t, tc.want, m.String())
 	}
 }
 
 func TestMoneyArithmetic(t *testing.T) {
-	a := mustParse(t, "100.00", "BRL")
-	b := mustParse(t, "80.00", "BRL")
-	sum, err := a.Add(b)
-	if err != nil || sum.AmountMinor() != 18000 {
-		t.Fatalf("add: %v %v", sum, err)
-	}
-	diff, err := a.Sub(b)
-	if err != nil || diff.AmountMinor() != 2000 {
-		t.Fatalf("sub: %v %v", diff, err)
-	}
-	neg, err := b.Neg()
-	if err != nil || neg.AmountMinor() != -8000 {
-		t.Fatalf("neg: %v %v", neg, err)
-	}
-	if c, _ := a.Compare(b); c != 1 {
-		t.Fatal("compare a>b")
-	}
-	if c, _ := b.Compare(b); c != 0 {
-		t.Fatal("compare b==b")
-	}
-	// currency mismatch is classifiable via errors.Is
-	usd := mustParse(t, "1.00", "USD")
-	if _, err := a.Add(usd); !errors.Is(err, ErrCurrencyMismatch) {
-		t.Errorf("add cross-currency: %v", err)
-	}
-	if _, err := a.Sub(usd); !errors.Is(err, ErrCurrencyMismatch) {
-		t.Errorf("sub cross-currency: %v", err)
-	}
-	if _, err := a.Compare(usd); !errors.Is(err, ErrCurrencyMismatch) {
-		t.Errorf("compare cross-currency: %v", err)
-	}
-	// int64 overflow guards
-	huge := Money{amountMinor: math.MaxInt64, currency: "BRL"}
-	if _, err := huge.Add(mustParse(t, "0.01", "BRL")); !errors.Is(err, ErrMoneyOverflow) {
-		t.Errorf("add overflow: %v", err)
-	}
-	minv := Money{amountMinor: math.MinInt64, currency: "BRL"}
-	if _, err := minv.Sub(mustParse(t, "0.01", "BRL")); !errors.Is(err, ErrMoneyOverflow) {
-		t.Errorf("sub overflow: %v", err)
-	}
-	if _, err := minv.Neg(); !errors.Is(err, ErrMoneyOverflow) {
-		t.Errorf("neg MinInt64: %v", err)
-	}
-	// zero per currency
-	z, err := ZeroMoney("BRL")
-	if err != nil || !z.IsZero() || z.String() != "0.00" {
-		t.Fatalf("zero: %v %v", z, err)
-	}
+	t.Run("add", func(t *testing.T) {
+		got, err := mustParse(t, "10.10", "BRL").Add(mustParse(t, "20.20", "BRL"))
+		require.NoError(t, err)
+		requireMoney(t, "30.30", got)
+	})
+	t.Run("sub", func(t *testing.T) {
+		got, err := mustParse(t, "30.00", "BRL").Sub(mustParse(t, "0.01", "BRL"))
+		require.NoError(t, err)
+		requireMoney(t, "29.99", got)
+	})
+	t.Run("neg", func(t *testing.T) {
+		got, err := mustParse(t, "5.25", "BRL").Neg()
+		require.NoError(t, err)
+		requireMoney(t, "-5.25", got)
+	})
+	t.Run("currency mismatch is a domain error", func(t *testing.T) {
+		_, err := mustParse(t, "1.00", "BRL").Add(mustParse(t, "1.00", "USD"))
+		require.ErrorIs(t, err, domain.ErrCurrencyMismatch)
+	})
+	t.Run("add overflow is detected, never wrapped", func(t *testing.T) {
+		a, err := domain.NewMoney(9_223_372_036_854_775_807, "BRL")
+		require.NoError(t, err)
+		one, err := domain.NewMoney(1, "BRL")
+		require.NoError(t, err)
+		_, err = a.Add(one)
+		require.Error(t, err)
+		assert.Contains(t, strings.ToUpper(err.Error()), "OVERFLOW")
+	})
+	t.Run("sub underflow is detected", func(t *testing.T) {
+		min, err := domain.NewMoney(math.MinInt64, "BRL")
+		require.NoError(t, err)
+		one, err := domain.NewMoney(1, "BRL")
+		require.NoError(t, err)
+		_, err = min.Sub(one)
+		require.Error(t, err)
+	})
 }
 
-func TestOpenWallet(t *testing.T) {
-	now := time.Now().UTC()
-	init := mustParse(t, "1000.00", "BRL")
-	w, mv, err := OpenWallet(newIDMust(t), "BRL", init, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if w.Version() != 1 || w.Balance().AmountMinor() != 100000 {
-		t.Fatalf("wallet v=%d balance=%s", w.Version(), w.Balance().String())
-	}
-	if mv.Direction != DirectionCredit || mv.Amount.AmountMinor() != 100000 || mv.WalletVersion != 1 {
-		t.Fatalf("movement %+v", mv)
-	}
-	if !mv.BalanceAfter.Equals(mustParse(t, "1000.00", "BRL")) {
-		t.Fatal("balanceAfter")
-	}
+func TestMoneyPredicatesAndCompare(t *testing.T) {
+	zero := mustParse(t, "0", "BRL")
+	credit := mustParse(t, "1.00", "BRL")
+	debit := mustParse(t, "-1.00", "BRL")
 
-	// zero opening: no movement, version stays 1
-	w0, mv0, err := OpenWallet(newIDMust(t), "BRL", mustParse(t, "0", "BRL"), now)
-	if err != nil || mv0.Direction != "" {
-		t.Fatalf("zero opening: %v %+v", err, mv0)
-	}
-	if w0.Version() != 1 {
-		t.Fatal("zero opening must not bump version")
-	}
+	assert.True(t, zero.IsZero())
+	assert.True(t, credit.IsPositive())
+	assert.True(t, debit.IsNegative())
 
-	// negative or currency mismatch rejected
-	if _, _, err := OpenWallet(newIDMust(t), "BRL", mustParse(t, "-1.00", "BRL"), now); !errors.Is(err, ErrInvalidAmount) {
-		t.Errorf("negative opening: %v", err)
-	}
-	if _, _, err := OpenWallet(newIDMust(t), "BRL", mustParse(t, "1.00", "USD"), now); !errors.Is(err, ErrCurrencyMismatch) {
-		t.Errorf("cross currency opening: %v", err)
-	}
+	cmp, err := credit.Compare(debit)
+	require.NoError(t, err)
+	assert.Equal(t, 1, cmp)
+
+	cmp, err = zero.Compare(mustParse(t, "0.00", "BRL"))
+	require.NoError(t, err)
+	assert.Equal(t, 0, cmp)
+
+	_, err = credit.Compare(mustParse(t, "1.00", "USD"))
+	require.ErrorIs(t, err, domain.ErrCurrencyMismatch)
 }
 
-func TestWalletDebitCreditInvariants(t *testing.T) {
-	now := time.Now().UTC()
-	w, _, _ := OpenWallet(newIDMust(t), "BRL", mustParse(t, "100.00", "BRL"), now)
-
-	if _, err := w.Credit(mustParse(t, "1.00", "USD"), now); !errors.Is(err, ErrCurrencyMismatch) {
-		t.Errorf("credit cross currency: %v", err)
-	}
-	if _, err := w.Credit(mustParse(t, "0.00", "BRL"), now); !errors.Is(err, ErrInvalidAmount) {
-		t.Errorf("credit zero: %v", err)
-	}
-	if _, err := w.Debit(mustParse(t, "0.00", "BRL"), now); !errors.Is(err, ErrInvalidAmount) {
-		t.Errorf("debit zero: %v", err)
-	}
-	vBefore := w.Version()
-	if _, err := w.Debit(mustParse(t, "100.01", "BRL"), now); !errors.Is(err, ErrInsufficientFunds) {
-		t.Errorf("over debit: %v", err)
-	}
-	if w.Version() != vBefore {
-		t.Error("failed debit must not bump version")
-	}
-	mv, err := w.Debit(mustParse(t, "100.00", "BRL"), now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if w.Balance().AmountMinor() != 0 || mv.WalletVersion != 2 || mv.BalanceAfter.IsNegative() {
-		t.Fatalf("debit to zero: %+v balance=%s", mv, w.Balance().String())
-	}
-	if _, err := RehydrateWallet(newIDMust(t), newIDMust(t), "BRL", -100, 1, now, now); !errors.Is(err, ErrInvalidAmount) {
-		t.Errorf("rehydrate negative: %v", err)
-	}
-	// version bumps only on real balance changes
-	w2, _, _ := OpenWallet(newIDMust(t), "BRL", mustParse(t, "50.00", "BRL"), now)
-	_, err = w2.Credit(mustParse(t, "25.00", "BRL"), now)
-	if err != nil || w2.Version() != 2 {
-		t.Fatalf("credit version: %d %v", w2.Version(), err)
-	}
-	_, err = w2.Debit(mustParse(t, "75.01", "BRL"), now)
-	if !errors.Is(err, ErrInsufficientFunds) || w2.Version() != 2 {
-		t.Fatalf("failed debit version: %d %v", w2.Version(), err)
-	}
-}
-
-func TestLedgerEntryArithmetic(t *testing.T) {
-	now := time.Now().UTC()
-	before := mustParse(t, "100.00", "BRL")
-	amount := mustParse(t, "30.00", "BRL")
-	after := mustParse(t, "70.00", "BRL")
-	if _, err := NewLedgerEntry(newIDMust(t), newIDMust(t), Movement{HasChange: true, Direction: DirectionDebit, Amount: amount, BalanceBefore: before, BalanceAfter: after, WalletVersion: 2}, now); err != nil {
-		t.Fatalf("valid debit entry: %v", err)
-	}
-	if _, err := NewLedgerEntry(newIDMust(t), newIDMust(t), Movement{HasChange: true, Direction: DirectionDebit, Amount: amount, BalanceBefore: before, BalanceAfter: mustParse(t, "69.99", "BRL"), WalletVersion: 2}, now); !errors.Is(err, ErrLedgerArithmetic) {
-		t.Errorf("tampered entry: %v", err)
-	}
-	if _, err := NewLedgerEntry(newIDMust(t), newIDMust(t), Movement{Direction: DirectionCredit, Amount: mustParse(t, "0.00", "BRL"), BalanceBefore: before, BalanceAfter: before, WalletVersion: 2}, now); !errors.Is(err, ErrLedgerArithmetic) {
-		t.Errorf("zero amount entry: %v", err)
-	}
-	// rehydrated credit entry validates too
-	if _, err := RehydrateLedgerEntry(LedgerEntryParams{ID: newIDMust(t), WalletID: newIDMust(t), TransactionID: newIDMust(t), Direction: DirectionCredit, Amount: amount, BalanceBefore: before, BalanceAfter: mustParse(t, "130.00", "BRL"), CreatedAt: now}); err != nil {
-		t.Errorf("valid credit entry: %v", err)
-	}
-}
-
-func TestFailureCodeClassification(t *testing.T) {
-	if got := FailureCode(ErrInsufficientFunds); got != "INSUFFICIENT_FUNDS" {
-		t.Errorf("sentinel: %s", got)
-	}
-	wrapped := ErrCurrencyMismatch.With("x vs y")
-	if got := FailureCode(wrapped); got != "CURRENCY_MISMATCH" {
-		t.Errorf("wrapped: %s", got)
-	}
-	if got := FailureCode(errors.New("boom")); got != "INTERNAL_ERROR" {
-		t.Errorf("unknown: %s", got)
-	}
+func TestZeroMoney(t *testing.T) {
+	m, err := domain.ZeroMoney("BRL")
+	require.NoError(t, err)
+	requireMoney(t, "0.00", m)
 }

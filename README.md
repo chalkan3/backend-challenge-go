@@ -15,13 +15,46 @@ transactional outbox, inbox durável e controle de concorrência por carteira.
 | Mensageria | **AWS SQS (FIFO)** via LocalStack |
 | IdP | **Keycloak** (OAuth2/OIDC, `client_credentials`) |
 | Migrations | **goose** embarcadas no binário |
-| Métricas | Prometheus (`/metrics`), logs JSON estruturados (`slog`) |
+| Métricas | **go-kit metrics** (`kit/metrics` + provider Prometheus) em `/metrics`, logs JSON estruturados (`slog`) |
+| Testes unitários | **testify** (`require`/`assert`) com testes table-driven |
 
 > **Por que go-kit E Uber Fx?** O desafio exige Uber Fx para composição/ciclo
 > de vida. O go-kit complementa sem conflito: endpoints (`kit/endpoint`)
 > isolam casos de uso do transporte, `kit/transport/http` cuida de
-> decode/encode/erros e `kit/metrics` instrumenta com Prometheus. O domínio
+> decode/encode/erros, os endpoint middlewares (`authorize`, `instrument`)
+> são Decorators e `kit/metrics` instrumenta com Prometheus. O domínio
 > (`internal/domain`) não conhece nenhuma das duas.
+
+## Estrutura do projeto
+
+Layout hexagonal (ports & adapters) com os nomes de pacote idiomáticos da
+comunidade Go e o vocabulário do go-kit:
+
+```text
+cmd/walletd/            # binário: fx.New(bootstrap.App) + subcomando migrate
+internal/
+  domain/               # modelo puro: Money (value object), Wallet (aggregate),
+                        # WagerTransaction (state machine), LedgerEntry, eventos, erros
+  service/              # casos de uso (aplicação) + PORTS (repositórios, TxManager,
+                        # Instrumentation); sem pgx/HTTP/SQS/métricas
+  transport/http/       # go-kit HTTP: Endpoints, codecs, error encoder, middlewares
+  messaging/            # workers de fundo: consumer SQS, outbox relay, reference resolver
+  postgres/             # adapter pgx: pool, migrations, repositórios (Repository + UoW)
+  sqs/                  # adapter AWS SQS: client + publisher da outbox
+  auth/                 # adapter OIDC (jwx/JWKS): validação de bearer tokens
+  platform/             # config, logging (slog), metrics (kit/metrics + Prometheus)
+  bootstrap/            # composition root: fx.Modules + adapter de instrumentação
+  migrations/           # SQL goose embarcado (go:embed)
+test/integration/       # suíte end-to-end contra Postgres/Keycloak/LocalStack reais
+```
+
+Padrões de design aplicados: **Ports & Adapters** (hexagonal), **Repository**,
+**Unit of Work** (`TxManager`), **Decorator** (endpoint middlewares, http
+middlewares, access log), **Strategy** (dispatch por `TxKind`), **State**
+(máquina de estados da transação), **Observer** (port de instrumentação),
+**Adapter** (instrumentação → kit/metrics, SQS/pgx/OIDC), **Factory**
+(envelopes de eventos, rotas, métricas) e **Functional Options**
+(`WithReferencePolicy`, `WithLedgerPageSize`).
 
 ## Subindo o ambiente
 
@@ -163,8 +196,12 @@ por exigência do desafio), `CURRENCY_MISMATCH`, `PLAYER_WALLET_MISMATCH`,
 
 ## Testes
 
+Unitários com **testify**, table-driven, cobrindo os cinco pacotes de núcleo
+(domínio, casos de uso, transporte, mensageria e auth — os fakes dos ports
+demonstram a substituibilidade da arquitetura hexagonal):
+
 ```sh
-go test ./...            # unitários (domínio)
+go test ./...            # unitários (testify)
 go test -race ./...      # com detector de corrida
 go vet ./...
 ```

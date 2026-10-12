@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chalkan3/backend-challenge-go/internal/app"
 	"github.com/chalkan3/backend-challenge-go/internal/domain"
-	"github.com/chalkan3/backend-challenge-go/internal/infra/postgres"
+	"github.com/chalkan3/backend-challenge-go/internal/postgres"
+	"github.com/chalkan3/backend-challenge-go/internal/service"
 )
 
 // Direct (in-process) construction of the real services against the real
@@ -22,13 +22,14 @@ func newTestStore(t *testing.T) *postgres.Store {
 	return postgres.NewStore(pool)
 }
 
-func newTestWagerService(t *testing.T, store *postgres.Store, maxAttempts int, ttl time.Duration) *app.WagerService {
+func newTestWagerService(t *testing.T, store *postgres.Store, maxAttempts int, ttl time.Duration) *service.WagerService {
 	t.Helper()
-	return app.NewWagerServiceWithPolicy(store, testLogger, &silentInstrumentation{}, maxAttempts, ttl)
+	return service.NewWagerService(store, testLogger, &silentInstrumentation{},
+		service.WithReferencePolicy(maxAttempts, ttl))
 }
 
-func externalInputFor(provider, extID, playerID, walletID string) app.ExternalInput {
-	return app.ExternalInput{
+func externalInputFor(provider, extID, playerID, walletID string) service.ExternalInput {
+	return service.ExternalInput{
 		ProviderID:            provider,
 		ExternalTransactionID: extID,
 		PlayerID:              playerID,
@@ -47,7 +48,7 @@ func (s *silentInstrumentation) Duplicate(string)                            {}
 func (s *silentInstrumentation) ReferenceOutcome(string)                     {}
 func (s *silentInstrumentation) ReconciliationDivergence()                   {}
 
-var _ app.Instrumentation = (*silentInstrumentation)(nil)
+var _ service.Instrumentation = (*silentInstrumentation)(nil)
 
 // keep context imported for helpers used by other files in this package
 var _ = context.Background

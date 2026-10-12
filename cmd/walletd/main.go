@@ -1,6 +1,7 @@
-// walletd is the wallet service binary: API HTTP + consumidores, composto
-// com Uber Fx. Também expõe o subcomando `migrate` para aplicar/reverter
-// migrations manualmente.
+// Command walletd is the wallet service binary: HTTP API plus background
+// workers, composed with Uber Fx (dependency injection + lifecycle). It also
+// exposes the `migrate` subcommand to apply/rollback/status SQL migrations
+// manually, outside the application lifecycle.
 package main
 
 import (
@@ -11,8 +12,8 @@ import (
 	"go.uber.org/fx"
 
 	"github.com/chalkan3/backend-challenge-go/internal/bootstrap"
-	"github.com/chalkan3/backend-challenge-go/internal/infra/postgres"
 	"github.com/chalkan3/backend-challenge-go/internal/platform/config"
+	"github.com/chalkan3/backend-challenge-go/internal/postgres"
 )
 
 func main() {
@@ -29,6 +30,9 @@ func main() {
 	fx.New(bootstrap.App).Run()
 }
 
+// runMigrate executes the `migrate up|down|status` subcommand. It loads the
+// configuration only (no Fx graph) so it can run from CI against a fresh
+// database.
 func runMigrate() {
 	cfg, err := config.Load()
 	if err != nil {
@@ -56,7 +60,7 @@ func runMigrate() {
 	case "status":
 		if err := postgres.MigrateStatus(ctx, cfg.DBDSN); err != nil {
 			fmt.Fprintln(os.Stderr, "migrate status:", err)
-			os.Exit(1)
+			os.Exit(2)
 		}
 	default:
 		fmt.Fprintln(os.Stderr, "usage: walletd migrate up|down|status")

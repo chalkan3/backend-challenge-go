@@ -14,8 +14,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/google/uuid"
 
-	"github.com/chalkan3/backend-challenge-go/internal/app"
 	"github.com/chalkan3/backend-challenge-go/internal/domain"
+	"github.com/chalkan3/backend-challenge-go/internal/service"
 )
 
 // TestWalletLifecycleAndReconciliation covers opening, conflict on duplicate
@@ -525,7 +525,7 @@ func TestReferenceTTLRejection(t *testing.T) {
 	// app worker disputes the same rows (SKIP LOCKED), so claims interleave.
 	for i := 0; i < 14; i++ {
 		time.Sleep(500 * time.Millisecond)
-		err := store.WithinTx(context.Background(), func(ctx context.Context, r app.Repos) error {
+		err := store.WithinTx(context.Background(), func(ctx context.Context, r service.Repos) error {
 			claimed, err := r.Transactions().ClaimPendingReferences(ctx, time.Now().UTC(), 10)
 			if err != nil {
 				return err

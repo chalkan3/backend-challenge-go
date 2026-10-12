@@ -15,10 +15,10 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/chalkan3/backend-challenge-go/internal/domain"
-	"github.com/chalkan3/backend-challenge-go/internal/infra/postgres"
-	sqsinfra "github.com/chalkan3/backend-challenge-go/internal/infra/sqs"
+	"github.com/chalkan3/backend-challenge-go/internal/messaging"
 	"github.com/chalkan3/backend-challenge-go/internal/platform/config"
-	"github.com/chalkan3/backend-challenge-go/internal/worker"
+	"github.com/chalkan3/backend-challenge-go/internal/postgres"
+	sqsinfra "github.com/chalkan3/backend-challenge-go/internal/sqs"
 )
 
 // TestSQSConsumerAndInboxDedup publishes the ingress contract to the queue:
@@ -288,7 +288,7 @@ func TestOutboxRecoversWorkAbandonedByCrashedPublisher(t *testing.T) {
 	// STEP 3 — a restarted instance picks the row up and publishes it.
 	client := mustSQS(t)
 	eventsURL := mustQueueURL(t, client, "integration-events.fifo")
-	w := worker.NewOutboxWorker(store,
+	w := messaging.NewOutboxWorker(store,
 		sqsinfra.NewPublisher(client, sqsinfra.QueueURLs{Events: eventsURL}),
 		&config.Config{OutboxInterval: 50 * time.Millisecond, OutboxBatch: 100, OutboxLease: time.Hour},
 		testLogger, silentOutbox{})
@@ -327,7 +327,7 @@ func TestOutboxRecoversWorkAbandonedByCrashedPublisher(t *testing.T) {
 	}
 }
 
-// silentOutbox satisfies worker.Instrumentation for in-process workers.
+// silentOutbox satisfies messaging.Instrumentation for in-process workers.
 type silentOutbox struct{}
 
 func (silentOutbox) OutboxPublished()                       {}

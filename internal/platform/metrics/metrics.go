@@ -1,6 +1,11 @@
-// Package metrics wires go-kit metrics over the Prometheus registry.
-// Endpoint metrics use kit/metrics counters and histograms; worker gauges
-// use the Prometheus client directly.
+// Package metrics declares the service metrics as go-kit metric
+// primitives (kit/metrics) backed by the Prometheus client, all registered
+// on a per-process registry so tests and multiple Fx apps never collide.
+//
+// Every field is a kit metrics.Counter/Gauge/Histogram — including the
+// labeled ones, which are kitprometheus wrappers over the corresponding
+// vectors. Callers stay decoupled from Prometheus and label sets are
+// attached at the call site via With(labelValues...).
 package metrics
 
 import (
@@ -9,106 +14,97 @@ import (
 	stdprometheus "github.com/prometheus/client_golang/prometheus"
 )
 
+// Metrics is the metric registry of the service. Field names mirror the
+// Prometheus series names documented in README §observability.
 type Metrics struct {
 	registry *stdprometheus.Registry
 
-	// HTTP endpoint metrics (go-kit endpoint middleware).
-	RequestCount   metrics.Counter
-	RequestLatency metrics.Histogram
+	// HTTP endpoint metrics (go-kit endpoint middleware — Decorator).
+	RequestCount   metrics.Counter   // endpoint, success, error
+	RequestLatency metrics.Histogram // endpoint
 
-	// Domain counters.
-	WagerResults              *stdprometheus.CounterVec // kind, status, failure_code, channel
-	Duplicates                *stdprometheus.CounterVec // source
-	OutboxPublished           stdprometheus.Counter
-	OutboxFailures            stdprometheus.Counter
-	OutboxPending             stdprometheus.Gauge
-	OutboxLagSeconds          stdprometheus.Gauge
-	ConsumerReceived          stdprometheus.Counter
-	ConsumerRetries           stdprometheus.Counter
-	ConsumerDLQ               stdprometheus.Counter
-	ReconciliationDivergences stdprometheus.Counter
-	AuthFailures              *stdprometheus.CounterVec // reason
-	ReferenceResolved         *stdprometheus.CounterVec // outcome
+	// Domain metrics (adapted to service/messaging instrumentation ports).
+	WagerResults              metrics.Counter // kind, status, failure_code, channel
+	Duplicates                metrics.Counter // source
+	OutboxPublished           metrics.Counter
+	OutboxFailures            metrics.Counter
+	OutboxPending             metrics.Gauge
+	OutboxLagSeconds          metrics.Gauge
+	ConsumerReceived          metrics.Counter
+	ConsumerRetries           metrics.Counter
+	ConsumerDLQ               metrics.Counter
+	ReconciliationDivergences metrics.Counter
+	AuthFailures              metrics.Counter // reason
+	ReferenceResolved         metrics.Counter // outcome
 }
 
+// New builds the metric set. The Prometheus collectors are created here and
+// registered explicitly (kit's NewCounterFrom auto-registers on the global
+// registry, which breaks multiple Fx apps in one process).
 func New() *Metrics {
-	reg := stdprometheus.NewRegistry() // per-process registry: tests and
-	// multiple Fx apps never collide
-
-	// go-kit's NewCounterFrom/NewHistogramFrom auto-register on the global
-	// registry, which breaks multiple Fx apps in one process (fx tests).
-	// We build the collectors ourselves and register them on our own registry.
-	requestCounter := stdprometheus.NewCounterVec(stdprometheus.CounterOpts{
-		Namespace: "wallet", Subsystem: "endpoint", Name: "requests_total",
-		Help: "Total requests handled, by endpoint and outcome.",
-	}, []string{"endpoint", "success", "error"})
-	requestLatency := stdprometheus.NewHistogramVec(stdprometheus.HistogramOpts{
-		Namespace: "wallet", Subsystem: "endpoint", Name: "request_duration_seconds",
-		Help:    "Request latency in seconds.",
-		Buckets: stdprometheus.ExponentialBuckets(0.001, 2, 14),
-	}, []string{"endpoint"})
-
+	reg := stdprometheus.NewRegistry()
 	m := &Metrics{
-		RequestCount:   kitprometheus.NewCounter(requestCounter),
-		RequestLatency: kitprometheus.NewHistogram(requestLatency),
-		WagerResults: stdprometheus.NewCounterVec(stdprometheus.CounterOpts{
-			Namespace: "wallet", Subsystem: "wager", Name: "results_total",
-			Help: "Wager operation outcomes by kind, status, failure code and channel.",
-		}, []string{"kind", "status", "failure_code", "channel"}),
-		Duplicates: stdprometheus.NewCounterVec(stdprometheus.CounterOpts{
-			Namespace: "wallet", Name: "duplicates_total",
-			Help: "Duplicate deliveries detected (idempotent replays and inbox hits).",
-		}, []string{"source"}),
-		OutboxPublished: stdprometheus.NewCounter(stdprometheus.CounterOpts{
-			Namespace: "wallet", Subsystem: "outbox", Name: "published_total",
-			Help: "Outbox events successfully published.",
-		}),
-		OutboxFailures: stdprometheus.NewCounter(stdprometheus.CounterOpts{
-			Namespace: "wallet", Subsystem: "outbox", Name: "publish_failures_total",
-			Help: "Outbox publish attempts that failed and were scheduled for retry.",
-		}),
-		OutboxPending: stdprometheus.NewGauge(stdprometheus.GaugeOpts{
-			Namespace: "wallet", Subsystem: "outbox", Name: "pending",
-			Help: "Unpublished outbox rows right now.",
-		}),
-		OutboxLagSeconds: stdprometheus.NewGauge(stdprometheus.GaugeOpts{
-			Namespace: "wallet", Subsystem: "outbox", Name: "lag_seconds",
-			Help: "Age of the oldest unpublished outbox event.",
-		}),
-		ConsumerReceived: stdprometheus.NewCounter(stdprometheus.CounterOpts{
-			Namespace: "wallet", Subsystem: "consumer", Name: "received_total",
-			Help: "SQS messages received by the consumer.",
-		}),
-		ConsumerRetries: stdprometheus.NewCounter(stdprometheus.CounterOpts{
-			Namespace: "wallet", Subsystem: "consumer", Name: "retries_total",
-			Help: "Messages released for redelivery after transient failures.",
-		}),
-		ConsumerDLQ: stdprometheus.NewCounter(stdprometheus.CounterOpts{
-			Namespace: "wallet", Subsystem: "consumer", Name: "dlq_total",
-			Help: "Messages moved to the dead-letter queue.",
-		}),
-		ReconciliationDivergences: stdprometheus.NewCounter(stdprometheus.CounterOpts{
-			Namespace: "wallet", Subsystem: "reconciliation", Name: "divergences_total",
-			Help: "Reconciliations that found stored balance != ledger balance.",
-		}),
-		AuthFailures: stdprometheus.NewCounterVec(stdprometheus.CounterOpts{
-			Namespace: "wallet", Subsystem: "auth", Name: "failures_total",
-			Help: "Authentication/authorization failures by reason.",
-		}, []string{"reason"}),
-		ReferenceResolved: stdprometheus.NewCounterVec(stdprometheus.CounterOpts{
-			Namespace: "wallet", Subsystem: "reference", Name: "resolved_total",
-			Help: "Pending-reference resolutions by outcome.",
-		}, []string{"outcome"}),
+		registry: reg,
+		RequestCount: newCounter(reg, "endpoint", "requests_total",
+			"Total requests handled, by endpoint and outcome.", "endpoint", "success", "error"),
+		RequestLatency: newHistogram(reg, "endpoint", "request_duration_seconds",
+			"Request latency in seconds.", []string{"endpoint"}),
+		WagerResults: newCounter(reg, "wager", "results_total",
+			"Wager submissions by kind, terminal status, failure code and channel.",
+			"kind", "status", "failure_code", "channel"),
+		Duplicates: newCounter(reg, "wager", "duplicates_total",
+			"Idempotent replays by detection source.", "source"),
+		OutboxPublished: newCounter(reg, "outbox", "published_total",
+			"Integration events successfully published."),
+		OutboxFailures: newCounter(reg, "outbox", "failures_total",
+			"Outbox publish attempts that failed and will be retried."),
+		OutboxPending: newGauge(reg, "outbox", "pending",
+			"Outbox rows not yet published."),
+		OutboxLagSeconds: newGauge(reg, "outbox", "lag_seconds",
+			"Age of the oldest unpublished outbox row."),
+		ConsumerReceived: newCounter(reg, "consumer", "received_total",
+			"SQS messages received by the wager consumer."),
+		ConsumerRetries: newCounter(reg, "consumer", "retries_total",
+			"Messages released for redelivery after transient failures."),
+		ConsumerDLQ: newCounter(reg, "consumer", "dlq_total",
+			"Messages moved to the dead-letter queue."),
+		ReconciliationDivergences: newCounter(reg, "reconciliation", "divergences_total",
+			"Reconciliations that found stored balance != ledger balance."),
+		AuthFailures: newCounter(reg, "auth", "failures_total",
+			"Authentication/authorization failures by reason.", "reason"),
+		ReferenceResolved: newCounter(reg, "reference", "resolved_total",
+			"Pending-reference resolutions by outcome.", "outcome"),
 	}
-	reg.MustRegister(
-		requestCounter, requestLatency,
-		m.WagerResults, m.Duplicates,
-		m.OutboxPublished, m.OutboxFailures, m.OutboxPending, m.OutboxLagSeconds,
-		m.ConsumerReceived, m.ConsumerRetries, m.ConsumerDLQ,
-		m.ReconciliationDivergences, m.AuthFailures, m.ReferenceResolved,
-	)
 	return m
 }
 
 // Registry exposes the Prometheus registry for the /metrics handler.
 func (m *Metrics) Registry() *stdprometheus.Registry { return m.registry }
+
+// newCounter builds a kit counter registered on reg (Factory helpers).
+func newCounter(reg *stdprometheus.Registry, subsystem, name, help string, labels ...string) metrics.Counter {
+	vec := stdprometheus.NewCounterVec(stdprometheus.CounterOpts{
+		Namespace: "wallet", Subsystem: subsystem, Name: name, Help: help,
+	}, labels)
+	reg.MustRegister(vec)
+	return kitprometheus.NewCounter(vec)
+}
+
+// newGauge builds a kit gauge registered on reg.
+func newGauge(reg *stdprometheus.Registry, subsystem, name, help string) metrics.Gauge {
+	vec := stdprometheus.NewGaugeVec(stdprometheus.GaugeOpts{
+		Namespace: "wallet", Subsystem: subsystem, Name: name, Help: help,
+	}, nil)
+	reg.MustRegister(vec)
+	return kitprometheus.NewGauge(vec)
+}
+
+// newHistogram builds a kit histogram registered on reg.
+func newHistogram(reg *stdprometheus.Registry, subsystem, name, help string, labels []string) metrics.Histogram {
+	vec := stdprometheus.NewHistogramVec(stdprometheus.HistogramOpts{
+		Namespace: "wallet", Subsystem: subsystem, Name: name, Help: help,
+		Buckets: stdprometheus.ExponentialBuckets(0.001, 2, 14),
+	}, labels)
+	reg.MustRegister(vec)
+	return kitprometheus.NewHistogram(vec)
+}

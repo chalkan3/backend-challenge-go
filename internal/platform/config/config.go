@@ -139,15 +139,6 @@ func (c *Config) validate() error {
 	return nil
 }
 
-// LedgerPageSize implements app.LedgerConfigSource.
-func (c *Config) LedgerPageSize() int { return c.LedgerPageMax }
-
-// MaxReferenceAttempts implements app.ReferenceConfigSource.
-func (c *Config) MaxReferenceAttempts() int { return c.ReferenceMaxAttempts }
-
-// ReferenceTTLDuration implements app.ReferenceConfigSource.
-func (c *Config) ReferenceTTLDuration() time.Duration { return c.ReferenceTTL }
-
 // JWKSURL derives the discovery JWKS address from the issuer unless
 // explicitly overridden (useful when the issuer host differs between the
 // token producer and the validator, e.g. inside Docker Compose).
