@@ -1,0 +1,44 @@
+# Prometheus — two scrape jobs, deliberately separate:
+#
+#   wallet-apps    the domain metrics the service exposes at /metrics
+#                  (go-kit + Prometheus): balances, wagers, outbox lag, DLQ.
+#   otel-collector the R.E.D. metrics derived from traces (spanmetrics) and
+#                  the service graph, plus the collector's own health.
+#
+# Keeping them as distinct jobs means an observability-stack outage empties
+# only the second; the business metrics keep flowing.
+global:
+  # 5s: fast enough to watch a 3-instance race settle in a dashboard, cheap
+  # enough for a laptop.
+  scrape_interval: 5s
+  evaluation_interval: 5s
+  external_labels:
+    cluster: wallet-local
+
+scrape_configs:
+  - job_name: wallet-apps
+    metrics_path: /metrics
+    static_configs:
+      # All three replicas share instance labels via the service.instance.id
+      # set in the OTel resource; here the target address distinguishes them.
+      - targets:
+          - app:8080
+          - app-2:8080
+          - app-3:8080
+        labels:
+          service: wallet
+    # app-2/app-3 only exist in the "multi" profile; Prometheus tolerates a
+    # missing target (it shows as down) instead of failing the whole job.
+    honor_labels: true
+
+  - job_name: otel-collector
+    static_configs:
+      - targets: [otel-collector:8889]
+        labels:
+          service: otel-collector
+
+  # The collector's internal telemetry (queue length, dropped spans) — the
+  # signal that tells you the pipeline itself is the problem.
+  - job_name: otel-collector-internal
+    static_configs:
+      - targets: [otel-collector:8888]

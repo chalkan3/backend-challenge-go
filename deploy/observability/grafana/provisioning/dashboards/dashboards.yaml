@@ -1,0 +1,16 @@
+apiVersion: 1
+
+# The provisioning provider points Grafana at the checkout's dashboard JSON
+# files, so they are versioned with the code and reviewed like any other
+# artifact. allowUiUpdates stays false: the file is the source of truth.
+providers:
+  - name: wallet
+    orgId: 1
+    folder: Wallet
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/dashboards
+      foldersFromFilesStructure: false

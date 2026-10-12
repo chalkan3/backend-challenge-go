@@ -9,8 +9,8 @@ comunidade Go e vocabulário do go-kit:
 
 | Pacote | Responsabilidade |
 | --- | --- |
-| `internal/domain` | Modelo puro: `Money` (value object), `Wallet` (aggregate root), `WagerTransaction` (máquina de estados), `LedgerEntry`, envelopes de eventos, erros com código estável |
-| `internal/service` | Casos de uso + **ports** (`ports.go`: repositórios, `TxManager`, `Instrumentation`) e erros classificados |
+| `internal/domain` | Modelo puro: `Money` (value object), `Wallet` (aggregate root), `WagerTransaction` (máquina de estados), `LedgerEntry`, envelopes de eventos, erros com código estável, **Specifications** (`specification.go`, `spec_transaction.go`) |
+| `internal/service` | Casos de uso + **ports** (`ports.go`: repositórios, `TxManager`, `Instrumentation`), erros classificados e **Strategy registry** (`strategy.go`) |
 | `internal/transport/http` | go-kit: `Endpoints`, decoders/encoders, error encoder, middlewares de endpoint e de rede |
 | `internal/messaging` | Workers de fundo: consumer SQS (inbox), outbox relay, reference resolver |
 | `internal/postgres` | Adapter pgx: pool, migrations goose, repositórios, store (unit of work) |
@@ -30,9 +30,19 @@ Padrões de design explícitos:
   domínio + ledger + inbox + outbox) em uma única transação SQL.
 - **Decorator** — endpoint middlewares (`authorize`, `instrument`), middlewares
   de rede (`auth`, `logRequests`), workers empilhados por composição.
-- **Strategy** — dispatch por `TxKind` (`WagerService.strategies`): o pipeline
-  compartilhado (idempotência, lock da carteira, persistência) fica livre de
-  condicionais por tipo.
+- **Strategy + Registry** — dispatch por `TxKind` via `service.StrategyRegistry`
+  (`strategy.go`): um `wagerStrategy` por tipo é registrado no registry, não
+  num `map` inline. O pipeline compartilhado (idempotência, lock da carteira,
+  persistência) fica livre de condicionais por tipo, e adicionar um tipo novo
+  é *Open/Closed*: registra-se a estratégia sem editar o pipeline. O registry
+  é substituível via `WithStrategyRegistry` (Functional Options), o ponto de
+  extensão do caso de uso.
+- **Specification** — regras de negócio como predicados nomeados e componíveis
+  (`domain/specification.go`, `domain/spec_transaction.go`). A "forma" de uma
+  operação externa é um `And(...)` de regras (kind, identidade, política de
+  valor zero/positivo, referência obrigatória), avaliadas numa ordem fixa que
+  preserva o código de erro publicado. Cada regra é testável isoladamente e a
+  composição é verificada por teste (`specification_test.go`).
 - **State** — máquina de estados documentada (`allowedTransitions`) com
   transições validadas no agregado.
 - **Observer** — port `Instrumentation`/`ConsumerMetrics`: casos de uso e
@@ -41,9 +51,9 @@ Padrões de design explícitos:
   pgx/SQS/OIDC adaptados aos ports.
 - **Factory Method** — construtores de eventos de integração, rotas HTTP
   declarativas, helpers de métricas.
-- **Functional Options** — `WithReferencePolicy`, `WithLedgerPageSize`;
-  configuração entra no caso de uso como valor simples, injetada pelo
-  composition root.
+- **Functional Options** — `WithReferencePolicy`, `WithLedgerPageSize`,
+  `WithStrategyRegistry`; configuração entra no caso de uso como valor
+  simples, injetada pelo composition root.
 - **Value Object / Aggregate (DDD)** — `Money` imutável; `Wallet` só muda via
   `Credit`/`Debit`, que preservam os invariantes e produzem `Movement`.
 
@@ -215,20 +225,46 @@ arquitetura), table-driven e sem I/O.
 
 ## 10. Observabilidade
 
+Três sinais, três donos — nenhum deles duplica o outro:
+
+| Sinal | Onde vive | Quem consulta |
+| --- | --- | --- |
+| Métricas | go-kit metrics → Prometheus em `/metrics` | Prometheus → Grafana |
+| Traces | OTLP/gRPC → Collector → Tempo | Grafana (TraceQL) |
+| Logs | `slog` JSON em stdout (+ espelho OTLP → Loki) | `jq`/Loki, correlacionados por `trace_id` |
+
 - Logs JSON (`slog`) com `correlationId`, `messageId`, `transactionId`,
-  `walletId` e `providerId` quando disponíveis; sem payloads financeiros
-  completos nem credenciais.
+  `walletId`, `providerId` e `trace_id`/`span_id` quando o tracing está
+  ativo — é a chave de junção entre uma linha de log e seu trace.
 - Métricas Prometheus (`/metrics`): resultado por status/kind/canal,
   duplicatas por origem, retries, DLQ, conflitos, atraso e pendência da
-  outbox, latência por endpoint (go-kit histogram) e divergências de
-  reconciliação. Health: `/health/live` (processo) e `/health/ready`
-  (Postgres + SQS).
+  outbox, latência por endpoint (go-kit histogram), falhas de auth por
+  motivo e divergências de reconciliação. Health: `/health/live` (processo)
+  e `/health/ready` (Postgres + SQS).
+- **Tracing (OpenTelemetry)** é opt-in (`WALLET_OTEL_ENABLED`, default
+  `false`): sem Collector o processo sobe normalmente com um tracer no-op,
+  então nenhum call site precisa de nil check. Um trace HTTP atravessa
+  transporte → caso de uso → repositório, com os spans do banco emitidos
+  pelo `pgx` tracer injetado uma única vez no pool.
+- O **Collector** é o único ponto de ingestão: a aplicação nunca sabe qual
+  backend armazena os traces. Trocar Tempo por Jaeger é mudar um YAML.
+  Ele também **deriva** métricas dos spans (`spanmetrics`, `servicegraph`),
+  o que dá latência/erro por span sem uma linha a mais de código e sem
+  duplicar os contadores de domínio.
+- Os **dashboards são código**: JSON versionado em
+  `deploy/observability/grafana/dashboards`, provisionado no start com
+  `allowUiUpdates: false`. O arquivo é a fonte da verdade, revisado como
+  qualquer outro artefato.
+
+Subindo a stack: `docker compose --profile observability up --build` (Grafana
+em `:3000`, Prometheus em `:9090`, Tempo em `:3200`). Os traces só aparecem
+com `WALLET_OTEL_ENABLED=true`.
 
 ## 11. Limitações e trabalho não concluído
 
 - Escala monetária fixa 2 (sem JPY/KWD); sem conversão de moeda.
-- Tracing OpenTelemetry e dashboards não implementados (diferenciais
-  opcionais); partidas dobradas no ledger também não (opcional).
+- Partidas dobradas no ledger (opcional) e teste de carga reprodutível não
+  implementados. Amostragem de traces é por razão fixa, sem tail sampling.
 - Emulação de falha "kill -9" está documentada via `docker compose kill`,
   mas não há um harness automatizado dedicado para o cenário 5/6 do §13
   (os demais cenários têm teste).

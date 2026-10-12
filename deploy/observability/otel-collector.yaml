@@ -1,0 +1,108 @@
+# OpenTelemetry Collector — the single ingestion point of the service.
+#
+# The application exports OTLP/gRPC (traces) here and nothing else: it never
+# knows which backend stores them. Swapping Tempo for Jaeger, or adding a
+# vendor, is a change to this file, not to the Go code. That indirection is
+# the whole reason a Collector sits in the middle instead of the app talking
+# straight to Tempo.
+#
+# Pipelines:
+#   traces → batch → Tempo
+#   logs   → batch → Loki   (the slog bridge, correlated by trace_id)
+#
+# The servicegraph + spanmetrics connectors DERIVE metrics from the traces,
+# so latency/error/provider series exist without a single extra line of
+# application code — and without duplicating what the domain counters in
+# /metrics already report.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # Batching amortises export round-trips; the queue absorbs a backend blip.
+  batch:
+    timeout: 1s
+    send_batch_size: 1024
+  # memory_limiter must run first: it protects the Collector from OOM when a
+  # backend stalls and the queue grows.
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 75
+    spike_limit_percentage: 20
+  # resource adds the collector's own identity, so an operator can tell which
+  # hop dropped a span.
+  resourcedetection:
+    detectors: [env, system]
+    timeout: 2s
+
+connectors:
+  # R.E.D. metrics (Rate, Errors, Duration) derived from spans: one series
+  # per (service, span name, status) with a latency histogram.
+  spanmetrics:
+    histogram:
+      explicit:
+        buckets: [5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2.5s, 5s]
+    dimensions:
+      - name: wallet.kind
+      - name: wallet.status
+      - name: wallet.failure_code
+      - name: wallet.channel
+      - name: http.request.method
+      - name: http.response.status_code
+  # The service graph connector builds a call graph from span parent/child
+  # links: request rate and error rate per edge, the data behind the
+  # "service graph" panel.
+  servicegraph:
+    store:
+      ttl: 30s
+      max_items: 1000
+
+exporters:
+  # Traces to Tempo over OTLP/gRPC (Tempo's native ingest protocol).
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+  # Logs to Loki via Loki's OTLP endpoint (native since Loki 3.0).
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+  # Derived metrics are exposed for Prometheus to scrape.
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    resource_to_telemetry_conversion:
+      enabled: true
+  # Debug output is opt-in: it is verbose, so it stays behind loglevel.
+  debug:
+    verbosity: basic
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  zpages:
+    endpoint: 0.0.0.0:55679
+
+service:
+  extensions: [health_check, zpages]
+  telemetry:
+    logs:
+      level: warn
+    metrics:
+      level: detailed
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resourcedetection, batch]
+      exporters: [otlp/tempo, spanmetrics, servicegraph]
+    metrics:
+      receivers: [spanmetrics, servicegraph]
+      processors: [batch]
+      exporters: [prometheus]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlphttp/loki]

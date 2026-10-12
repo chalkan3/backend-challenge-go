@@ -1,0 +1,55 @@
+apiVersion: 1
+
+# Datasources are provisioned as code, never clicked in the UI: the stack is
+# reproducible from a clean `docker compose up`, and the correlation links
+# (trace → logs, log → trace) work on every machine identically.
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    uid: prometheus
+    jsonData:
+      # Matches the scrape interval: a coarser step would hide short bursts.
+      timeInterval: 5s
+      # Adds the exemplar links that jump from a latency spike on a graph
+      # straight to the exact trace that produced it.
+      exemplarTraceIdDestinations:
+        - name: trace_id
+          datasourceUid: tempo
+
+  - name: Tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    uid: tempo
+    jsonData:
+      tracesToLogsV2:
+        datasourceUid: loki
+        spanStartTimeShift: -2m
+        spanEndTimeShift: 2m
+        filterByTraceID: true
+        filterBySpanID: false
+      tracesToMetrics:
+        datasourceUid: prometheus
+        queries:
+          - name: Request rate
+            query: sum(rate(traces_span_metrics_calls_total{$$__tags}[5m]))
+      serviceMap:
+        datasourceUid: prometheus
+      nodeGraph:
+        enabled: true
+
+  - name: Loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    uid: loki
+    jsonData:
+      derivedFields:
+        # A trace_id in a log line becomes a clickable link to the trace.
+        - datasourceUid: tempo
+          matcherRegex: '"trace_id":"(\w+)"'
+          name: TraceID
+          url: '$${__value.raw}'
