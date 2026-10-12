@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/chalkan33/wallet/internal/app"
+	"github.com/chalkan3/backend-challenge-go/internal/app"
 )
 
 type inboxRepo struct{ ex querier }

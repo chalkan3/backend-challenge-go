@@ -10,9 +10,9 @@ import (
 
 	"go.uber.org/fx"
 
-	"github.com/chalkan33/wallet/internal/bootstrap"
-	"github.com/chalkan33/wallet/internal/infra/postgres"
-	"github.com/chalkan33/wallet/internal/platform/config"
+	"github.com/chalkan3/backend-challenge-go/internal/bootstrap"
+	"github.com/chalkan3/backend-challenge-go/internal/infra/postgres"
+	"github.com/chalkan3/backend-challenge-go/internal/platform/config"
 )
 
 func main() {

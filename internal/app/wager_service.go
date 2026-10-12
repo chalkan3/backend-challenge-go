@@ -7,7 +7,7 @@ import (
 	"math"
 	"time"
 
-	"github.com/chalkan33/wallet/internal/domain"
+	"github.com/chalkan3/backend-challenge-go/internal/domain"
 )
 
 // WagerService implements the shared use case for the five external kinds.

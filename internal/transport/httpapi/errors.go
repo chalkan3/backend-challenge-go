@@ -8,7 +8,7 @@ import (
 
 	kithttp "github.com/go-kit/kit/transport/http"
 
-	"github.com/chalkan33/wallet/internal/app"
+	"github.com/chalkan3/backend-challenge-go/internal/app"
 )
 
 // errorEncoder maps classified errors to HTTP contracts:

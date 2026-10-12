@@ -20,7 +20,7 @@ import (
 	"github.com/lestrrat-go/jwx/v2/jws"
 	"github.com/lestrrat-go/jwx/v2/jwt"
 
-	"github.com/chalkan33/wallet/internal/platform/config"
+	"github.com/chalkan3/backend-challenge-go/internal/platform/config"
 )
 
 // Principal is the authenticated identity.

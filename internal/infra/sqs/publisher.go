@@ -6,7 +6,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 
-	"github.com/chalkan33/wallet/internal/app"
+	"github.com/chalkan3/backend-challenge-go/internal/app"
 )
 
 // Publisher publishes claimed outbox events to the integration events FIFO

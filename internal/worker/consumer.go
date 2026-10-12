@@ -15,11 +15,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	awssqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 
-	"github.com/chalkan33/wallet/internal/app"
-	"github.com/chalkan33/wallet/internal/domain"
-	infraqs "github.com/chalkan33/wallet/internal/infra/sqs"
-	"github.com/chalkan33/wallet/internal/platform/config"
-	"github.com/chalkan33/wallet/internal/platform/logging"
+	"github.com/chalkan3/backend-challenge-go/internal/app"
+	"github.com/chalkan3/backend-challenge-go/internal/domain"
+	infraqs "github.com/chalkan3/backend-challenge-go/internal/infra/sqs"
+	"github.com/chalkan3/backend-challenge-go/internal/platform/config"
+	"github.com/chalkan3/backend-challenge-go/internal/platform/logging"
 )
 
 const consumerName = "sqs-wager-consumer"

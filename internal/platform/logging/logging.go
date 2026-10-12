@@ -9,7 +9,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/chalkan33/wallet/internal/platform/config"
+	"github.com/chalkan3/backend-challenge-go/internal/platform/config"
 )
 
 // New builds the JSON logger from the validated configuration.

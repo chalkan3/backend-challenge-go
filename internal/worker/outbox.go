@@ -10,9 +10,9 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/chalkan33/wallet/internal/app"
-	"github.com/chalkan33/wallet/internal/infra/sqs"
-	"github.com/chalkan33/wallet/internal/platform/config"
+	"github.com/chalkan3/backend-challenge-go/internal/app"
+	"github.com/chalkan3/backend-challenge-go/internal/infra/sqs"
+	"github.com/chalkan3/backend-challenge-go/internal/platform/config"
 )
 
 // OutboxWorker publishes committed integration events. Multiple instances

@@ -8,8 +8,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/chalkan33/wallet/internal/app"
-	"github.com/chalkan33/wallet/internal/domain"
+	"github.com/chalkan3/backend-challenge-go/internal/app"
+	"github.com/chalkan3/backend-challenge-go/internal/domain"
 )
 
 const txCols = `id, kind, origin, provider_id, external_transaction_id, idempotency_key, payload_hash,

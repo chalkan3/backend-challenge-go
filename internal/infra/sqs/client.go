@@ -12,7 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 
-	"github.com/chalkan33/wallet/internal/platform/config"
+	"github.com/chalkan3/backend-challenge-go/internal/platform/config"
 )
 
 // NewClient builds an SQS client pointed at the configured endpoint

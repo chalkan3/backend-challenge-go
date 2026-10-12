@@ -13,7 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/google/uuid"
 
-	"github.com/chalkan33/wallet/internal/domain"
+	"github.com/chalkan3/backend-challenge-go/internal/domain"
 )
 
 // TestSQSConsumerAndInboxDedup publishes the ingress contract to the queue:

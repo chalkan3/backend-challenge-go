@@ -10,8 +10,8 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib" // database/sql driver for goose
 	"github.com/pressly/goose/v3"
 
-	"github.com/chalkan33/wallet/internal/app"
-	"github.com/chalkan33/wallet/internal/migrations"
+	"github.com/chalkan3/backend-challenge-go/internal/app"
+	"github.com/chalkan3/backend-challenge-go/internal/migrations"
 )
 
 // MigrateUp applies every pending migration (idempotent).

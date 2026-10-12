@@ -7,7 +7,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/chalkan33/wallet/internal/app"
+	"github.com/chalkan3/backend-challenge-go/internal/app"
 )
 
 // Store is the pgx-backed TxManager. The SQL transaction boundary is explicit:

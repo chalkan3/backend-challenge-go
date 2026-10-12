@@ -10,8 +10,8 @@ import (
 
 	"github.com/go-kit/kit/endpoint"
 
-	"github.com/chalkan33/wallet/internal/app"
-	"github.com/chalkan33/wallet/internal/platform/metrics"
+	"github.com/chalkan3/backend-challenge-go/internal/app"
+	"github.com/chalkan3/backend-challenge-go/internal/platform/metrics"
 )
 
 // Endpoints bundles every go-kit endpoint.

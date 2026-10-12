@@ -7,8 +7,8 @@ import (
 
 	"github.com/go-kit/kit/endpoint"
 
-	"github.com/chalkan33/wallet/internal/app"
-	"github.com/chalkan33/wallet/internal/domain"
+	"github.com/chalkan3/backend-challenge-go/internal/app"
+	"github.com/chalkan3/backend-challenge-go/internal/domain"
 )
 
 // Requests/responses and endpoint bodies for the go-kit transport.

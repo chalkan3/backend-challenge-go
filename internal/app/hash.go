@@ -5,7 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 
-	"github.com/chalkan33/wallet/internal/domain"
+	"github.com/chalkan3/backend-challenge-go/internal/domain"
 )
 
 // canonicalHash computes the deterministic payload hash used by idempotency:

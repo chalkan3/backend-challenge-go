@@ -9,7 +9,7 @@ import (
 
 	"go.uber.org/fx"
 
-	"github.com/chalkan33/wallet/internal/bootstrap"
+	"github.com/chalkan3/backend-challenge-go/internal/bootstrap"
 )
 
 // TestFxCompositionAndLifecycle verifies the Fx graph resolves and that the

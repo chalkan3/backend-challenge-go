@@ -15,9 +15,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"github.com/chalkan33/wallet/internal/infra/auth"
-	"github.com/chalkan33/wallet/internal/infra/sqs"
-	"github.com/chalkan33/wallet/internal/platform/config"
+	"github.com/chalkan3/backend-challenge-go/internal/infra/auth"
+	"github.com/chalkan3/backend-challenge-go/internal/infra/sqs"
+	"github.com/chalkan3/backend-challenge-go/internal/platform/config"
 )
 
 // Deps carries everything the HTTP layer needs.

@@ -8,7 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/chalkan33/wallet/internal/platform/config"
+	"github.com/chalkan3/backend-challenge-go/internal/platform/config"
 )
 
 // NewPool opens the connection pool. Callers own the lifecycle (Fx closes it

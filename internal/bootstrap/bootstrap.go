@@ -16,15 +16,15 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/fx"
 
-	"github.com/chalkan33/wallet/internal/app"
-	"github.com/chalkan33/wallet/internal/infra/auth"
-	"github.com/chalkan33/wallet/internal/infra/postgres"
-	"github.com/chalkan33/wallet/internal/infra/sqs"
-	"github.com/chalkan33/wallet/internal/platform/config"
-	"github.com/chalkan33/wallet/internal/platform/logging"
-	"github.com/chalkan33/wallet/internal/platform/metrics"
-	"github.com/chalkan33/wallet/internal/transport/httpapi"
-	"github.com/chalkan33/wallet/internal/worker"
+	"github.com/chalkan3/backend-challenge-go/internal/app"
+	"github.com/chalkan3/backend-challenge-go/internal/infra/auth"
+	"github.com/chalkan3/backend-challenge-go/internal/infra/postgres"
+	"github.com/chalkan3/backend-challenge-go/internal/infra/sqs"
+	"github.com/chalkan3/backend-challenge-go/internal/platform/config"
+	"github.com/chalkan3/backend-challenge-go/internal/platform/logging"
+	"github.com/chalkan3/backend-challenge-go/internal/platform/metrics"
+	"github.com/chalkan3/backend-challenge-go/internal/transport/httpapi"
+	"github.com/chalkan3/backend-challenge-go/internal/worker"
 )
 
 // NewHTTPDeps assembles the transport dependencies.

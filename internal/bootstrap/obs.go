@@ -1,7 +1,7 @@
 package bootstrap
 
 import (
-	"github.com/chalkan33/wallet/internal/platform/metrics"
+	"github.com/chalkan3/backend-challenge-go/internal/platform/metrics"
 )
 
 // instrumentation adapts the Prometheus registry to the instrumentation

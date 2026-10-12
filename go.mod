@@ -1,4 +1,4 @@
-module github.com/chalkan33/wallet
+module github.com/chalkan3/backend-challenge-go
 
 go 1.26.0
 

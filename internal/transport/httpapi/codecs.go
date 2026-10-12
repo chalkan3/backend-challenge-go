@@ -9,8 +9,8 @@ import (
 
 	kithttp "github.com/go-kit/kit/transport/http"
 
-	"github.com/chalkan33/wallet/internal/domain"
-	"github.com/chalkan33/wallet/internal/infra/auth"
+	"github.com/chalkan3/backend-challenge-go/internal/domain"
+	"github.com/chalkan3/backend-challenge-go/internal/infra/auth"
 )
 
 // Context keys populated by middleware and consumed by decoders/endpoints.
