@@ -15,9 +15,13 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/chalkan3/backend-challenge-go/internal/auth"
 	"github.com/chalkan3/backend-challenge-go/internal/platform/config"
+	"github.com/chalkan3/backend-challenge-go/internal/platform/metrics"
+	"github.com/chalkan3/backend-challenge-go/internal/platform/otel"
 	"github.com/chalkan3/backend-challenge-go/internal/sqs"
 )
 
@@ -32,6 +36,8 @@ type Deps struct {
 	SQS  *awssqs.Client
 	URLs sqs.QueueURLs
 	Reg  *prometheus.Registry
+	OTel *otel.Provider
+	Met  *metrics.Metrics
 }
 
 // NewServer builds the *http.Server (lifecycle is managed by Fx).
@@ -90,7 +96,34 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "unknown route")
 	})
-	return d.logRequests(mux)
+	// Middleware order (outermost first):
+	//   tracing → access log → routes
+	// Tracing is outermost so the span covers the whole request — including
+	// the access-log line, which then carries the trace_id — and so that
+	// /health/live, though unlogged, is still traced for uptime visibility.
+	// otelhttp also extracts the incoming W3C traceparent, which is what
+	// stitches a provider's upstream trace onto ours.
+	return d.tracing(d.logRequests(mux))
+}
+
+// tracing wraps the router with the OpenTelemetry HTTP handler. The provider
+// is never nil for production wiring, but Instrument never assumes it: a
+// disabled provider installs a no-op tracer, so the same call site serves
+// every deployment.
+func (d Deps) tracing(next http.Handler) http.Handler {
+	h := otelhttp.NewHandler(next, "http.server",
+		otelhttp.WithTracerProvider(d.OTel.TracerProvider()),
+		otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
+			// Method+route-pattern would be ideal, but the pattern is only
+			// known after ServeMux matches; the concrete path is bounded
+			// enough (IDs appear only in the leaf segment).
+			return r.Method + " " + r.URL.Path
+		}),
+		otelhttp.WithFilter(func(r *http.Request) bool {
+			return r.URL.Path != "/metrics" // scraping would drown the traces
+		}),
+	)
+	return h
 }
 
 // handleLive is the liveness probe: the process is up; no dependency check.
@@ -103,15 +136,21 @@ func handleLive(w http.ResponseWriter, _ *http.Request) {
 // context (idempotency key, correlation id). It is the HTTP-level half of
 // authentication; coarse-grained authorization happens as an endpoint
 // middleware (see authorize).
+//
+// Rejections are counted here, not only in authorize: a missing or invalid
+// token never reaches the endpoint middleware, so counting solely there made
+// wallet_auth_failures_total blind to the most frequent failure of all.
 func (d Deps) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw := bearerToken(r)
 		if raw == "" {
+			d.Met.AuthFailures.With("reason", "missing_bearer_token").Add(1)
 			writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "missing bearer token")
 			return
 		}
 		p, err := d.Auth.Validate(raw)
 		if err != nil {
+			d.Met.AuthFailures.With("reason", "invalid_bearer_token").Add(1)
 			writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", err.Error())
 			return
 		}
@@ -128,7 +167,9 @@ func (d Deps) auth(next http.Handler) http.Handler {
 	})
 }
 
-// logRequests emits one JSON access log line per request.
+// logRequests emits one JSON access log line per request. When tracing is
+// active the line carries trace_id/span_id, which is the join key between a
+// log line and its trace (and, via the Collector, between Loki/Tempo).
 func (d Deps) logRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -137,12 +178,19 @@ func (d Deps) logRequests(next http.Handler) http.Handler {
 		if r.URL.Path == "/health/live" { // keep logs lean
 			return
 		}
-		d.Log.Info("http request",
+		attrs := []any{
 			slog.String("method", r.Method),
 			slog.String("path", r.URL.Path),
 			slog.Int("status", sw.status),
 			slog.Int64("duration_ms", time.Since(start).Milliseconds()),
-			slog.String("correlationId", sw.Header().Get("X-Correlation-Id")))
+			slog.String("correlationId", sw.Header().Get("X-Correlation-Id")),
+		}
+		if sc := trace.SpanContextFromContext(r.Context()); sc.IsValid() {
+			attrs = append(attrs,
+				slog.String("trace_id", sc.TraceID().String()),
+				slog.String("span_id", sc.SpanID().String()))
+		}
+		d.Log.Info("http request", attrs...)
 	})
 }
 

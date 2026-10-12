@@ -63,7 +63,9 @@ func instrument(name string, m *metrics.Metrics) endpoint.Middleware {
 //     match itself is checked inside the endpoint body).
 //
 // Every rejection is counted on wallet_auth_failures_total with a stable
-// reason before the error is surfaced to the error encoder.
+// reason before the error is surfaced to the error encoder. Token-level
+// failures are counted earlier, in the HTTP auth middleware, because they
+// never get this far.
 func authorize(m *metrics.Metrics, next endpoint.Endpoint, internalOnly, providerScoped bool) endpoint.Endpoint {
 	return func(ctx context.Context, request interface{}) (interface{}, error) {
 		p := principalFrom(ctx)

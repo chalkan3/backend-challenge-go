@@ -136,6 +136,9 @@ func (c *Consumer) handle(ctx context.Context, m awssqstypes.Message) {
 	body := aws.ToString(m.Body)
 	messageID := aws.ToString(m.MessageId)
 
+	ctx, span := c.hook.StartSpan(ctx, SpanConsumerHandle, Attr(AttrQueue, c.cfg.SQSRequestQueue))
+	defer span.End()
+
 	var envelope sqsEnvelope
 	if err := json.Unmarshal([]byte(body), &envelope); err != nil {
 		c.fail(ctx, m, &poison{Reason: "unparseable envelope: " + err.Error()})
@@ -146,6 +149,7 @@ func (c *Consumer) handle(ctx context.Context, m awssqstypes.Message) {
 	if envelope.MessageID != "" {
 		messageID = envelope.MessageID
 	}
+	span.SetAttributes(Attr(AttrMessageID, messageID), Attr(AttrOutcome, "received"))
 	ctx = logging.WithCorrelation(ctx, messageID)
 	ctx = logging.WithMessage(ctx, messageID)
 	log := c.log.With(slog.String("messageId", messageID))
@@ -211,17 +215,25 @@ func (c *Consumer) handle(ctx context.Context, m awssqstypes.Message) {
 	})
 	switch {
 	case err == nil:
+		span.SetOutcome("PROCESSED", "")
 		c.ack(ctx, m, log)
 	case errors.Is(err, service.ErrDuplicateInsert):
 		// Lost an insert race against a concurrent delivery of the same
 		// operation; the committed row wins, this delivery just acks.
+		span.SetAttributes(Attr(AttrDuplicate, true), Attr(AttrDuplicateSrc, "insert_race"))
 		c.ack(ctx, m, log)
 	case isPoison(err):
+		span.SetOutcome("DLQ", "POISON")
+		span.RecordError(err)
 		c.fail(ctx, m, err)
 	case service.IsValidation(err) || service.IsConflict(err) || service.IsNotFound(err):
 		// Terminal anomalies: the message can never succeed as-is.
+		span.SetOutcome("DLQ", "TERMINAL")
+		span.RecordError(err)
 		c.fail(ctx, m, &poison{Reason: err.Error()})
 	default:
+		span.SetOutcome("RETRY", "")
+		span.RecordError(err)
 		c.transient(ctx, m, err, log)
 	}
 }

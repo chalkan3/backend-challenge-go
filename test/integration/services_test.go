@@ -48,6 +48,19 @@ func (s *silentInstrumentation) Duplicate(string)                            {}
 func (s *silentInstrumentation) ReferenceOutcome(string)                     {}
 func (s *silentInstrumentation) ReconciliationDivergence()                   {}
 
+// StartSpan returns a no-op span: these tests exercise the use cases against
+// the real database, not the tracing pipeline.
+func (s *silentInstrumentation) StartSpan(ctx context.Context, _ string, _ ...service.SpanAttr) (context.Context, service.Span) {
+	return ctx, silentSpan{}
+}
+
+type silentSpan struct{}
+
+func (silentSpan) SetAttributes(...service.SpanAttr) {}
+func (silentSpan) SetOutcome(string, string)         {}
+func (silentSpan) RecordError(error)                 {}
+func (silentSpan) End()                              {}
+
 var _ service.Instrumentation = (*silentInstrumentation)(nil)
 
 // keep context imported for helpers used by other files in this package

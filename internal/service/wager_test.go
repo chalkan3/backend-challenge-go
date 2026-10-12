@@ -79,6 +79,30 @@ func (f *fakeStore) Duplicate(string)          {}
 func (f *fakeStore) ReferenceOutcome(string)   {}
 func (f *fakeStore) ReconciliationDivergence() {}
 
+// StartSpan returns a recording no-op span: the use cases must work with any
+// tracer, including one that drops every span (telemetry disabled).
+func (f *fakeStore) StartSpan(ctx context.Context, name string, attrs ...service.SpanAttr) (context.Context, service.Span) {
+	return ctx, &recordingSpan{name: name}
+}
+
+// recordingSpan captures what the use case annotated, so tests can assert on
+// the observability contract without a real exporter.
+type recordingSpan struct {
+	name     string
+	outcome  string
+	code     string
+	failures []error
+}
+
+func (s *recordingSpan) SetAttributes(...service.SpanAttr) {}
+func (s *recordingSpan) SetOutcome(status, code string)    { s.outcome, s.code = status, code }
+func (s *recordingSpan) RecordError(err error) {
+	if err != nil {
+		s.failures = append(s.failures, err)
+	}
+}
+func (s *recordingSpan) End() {}
+
 // fakeRepos bundles the per-port adapters over one store.
 type fakeRepos struct{ store *fakeStore }
 

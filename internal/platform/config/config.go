@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/chalkan3/backend-challenge-go/internal/platform/otel"
 )
 
 type Config struct {
@@ -45,6 +47,21 @@ type Config struct {
 	AuthIssuer   string // e.g. http://localhost:8080/realms/wallet
 	AuthJWKSURL  string // optional override; derived from issuer when empty
 	AuthAudience string // optional audience check; empty disables it
+
+	// Telemetry (OpenTelemetry). Tracing is opt-in: with it disabled the
+	// service runs exactly as before, so local and CI runs never depend on an
+	// observability stack being up.
+	TelemetryEnabled       bool
+	TelemetryEndpoint      string // OTLP/gRPC host:port of the Collector
+	TelemetryInsecure      bool
+	TelemetryServiceName   string
+	TelemetryEnvironment   string
+	TelemetryInstanceID    string
+	TelemetrySampleRatio   float64
+	TelemetryLogsEnabled   bool
+	TelemetryExportTimeout time.Duration
+	TelemetryBatchTimeout  time.Duration
+	TelemetryMaxQueueSize  int
 
 	LedgerPageMax int
 }
@@ -86,6 +103,18 @@ func Load() (*Config, error) {
 		AuthAudience: env("WALLET_AUTH_AUDIENCE", ""),
 
 		LedgerPageMax: envInt("WALLET_LEDGER_PAGE_MAX", 200),
+
+		TelemetryEnabled:       envBool("WALLET_OTEL_ENABLED", false),
+		TelemetryEndpoint:      env("WALLET_OTEL_ENDPOINT", "localhost:4317"),
+		TelemetryInsecure:      envBool("WALLET_OTEL_INSECURE", true),
+		TelemetryServiceName:   env("WALLET_OTEL_SERVICE_NAME", "wallet"),
+		TelemetryEnvironment:   env("WALLET_ENV", "local"),
+		TelemetryInstanceID:    env("WALLET_INSTANCE_ID", hostnameOr("unknown")),
+		TelemetrySampleRatio:   envFloat("WALLET_OTEL_SAMPLE_RATIO", 1.0),
+		TelemetryLogsEnabled:   envBool("WALLET_OTEL_LOGS_ENABLED", true),
+		TelemetryExportTimeout: envDuration("WALLET_OTEL_EXPORT_TIMEOUT", 5*time.Second),
+		TelemetryBatchTimeout:  envDuration("WALLET_OTEL_BATCH_TIMEOUT", 2*time.Second),
+		TelemetryMaxQueueSize:  envInt("WALLET_OTEL_MAX_QUEUE_SIZE", 4096),
 	}
 	if err := c.validate(); err != nil {
 		return nil, err
@@ -133,6 +162,14 @@ func (c *Config) validate() error {
 	if c.ReferenceMaxAttempts < 1 || c.ReferenceTTL <= 0 {
 		errs = append(errs, "reference retry policy is invalid")
 	}
+	// Telemetry: enabling tracing without an endpoint would blackhole every
+	// span silently, so it is caught here like any other misconfiguration.
+	if err := c.Telemetry().Validate(); err != nil {
+		errs = append(errs, err.Error())
+	}
+	if c.TelemetrySampleRatio < 0 || c.TelemetrySampleRatio > 1 {
+		errs = append(errs, "WALLET_OTEL_SAMPLE_RATIO must be within [0,1]")
+	}
 	if len(errs) > 0 {
 		return fmt.Errorf("invalid configuration:\n  - %s", strings.Join(errs, "\n  - "))
 	}
@@ -148,6 +185,29 @@ func (c *Config) JWKSURL() string {
 	}
 	return strings.TrimSuffix(c.AuthIssuer, "/") + "/protocol/openid-connect/certs"
 }
+
+// Telemetry projects the flat configuration onto the otel package config.
+// It lives here (rather than in the otel package) so config stays the single
+// reader of the environment.
+func (c *Config) Telemetry() otel.Config {
+	return otel.Config{
+		Enabled:        c.TelemetryEnabled,
+		Endpoint:       c.TelemetryEndpoint,
+		Insecure:       c.TelemetryInsecure,
+		ServiceName:    c.TelemetryServiceName,
+		ServiceVersion: Version,
+		Environment:    c.TelemetryEnvironment,
+		InstanceID:     c.TelemetryInstanceID,
+		SampleRatio:    c.TelemetrySampleRatio,
+		ExportTimeout:  c.TelemetryExportTimeout,
+		BatchTimeout:   c.TelemetryBatchTimeout,
+		MaxQueueSize:   c.TelemetryMaxQueueSize,
+	}
+}
+
+// Version is the build version reported as the service.version telemetry
+// resource attribute.
+const Version = "dev"
 
 func env(key, def string) string {
 	if v, ok := os.LookupEnv(key); ok && v != "" {
@@ -174,6 +234,24 @@ func envBool(key string, def bool) bool {
 		if b, err := strconv.ParseBool(v); err == nil {
 			return b
 		}
+	}
+	return def
+}
+
+func envFloat(key string, def float64) float64 {
+	if v, ok := os.LookupEnv(key); ok && v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
+		}
+	}
+	return def
+}
+
+// hostnameOr names the process when no explicit instance id is configured, so
+// replicas of the same service are distinguishable in traces.
+func hostnameOr(def string) string {
+	if h, err := os.Hostname(); err == nil && h != "" {
+		return h
 	}
 	return def
 }

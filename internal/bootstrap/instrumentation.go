@@ -1,24 +1,33 @@
-// instrumentation.go adapts the go-kit metric registry to the observation
-// ports consumed by the use cases (service.Instrumentation) and the
-// background workers (messaging.Instrumentation, messaging.ConsumerMetrics)
-// — an Adapter per port, keeping every other layer free of metrics-library
-// imports. Uber Fx binds one instance to all three interfaces.
+// instrumentation.go adapts the observation backends to the port consumed by
+// the use cases (service.Instrumentation) — an Adapter, keeping the service
+// layer free of metrics- and tracing-library imports. The workers' ports are
+// adapted by messagingAdapter (see messaging_adapter.go).
+//
+// Two backends, one port: counters go to the go-kit metric registry (the
+// /metrics contract of the challenge) and spans go to OpenTelemetry. The
+// split is deliberate — metrics answer "how much/how fast over time",
+// traces answer "what happened to this one request".
 package bootstrap
 
 import (
+	"context"
+
 	"github.com/chalkan3/backend-challenge-go/internal/platform/metrics"
+	"github.com/chalkan3/backend-challenge-go/internal/platform/otel"
+	"github.com/chalkan3/backend-challenge-go/internal/service"
 )
 
 type instrumentation struct {
 	m *metrics.Metrics
+	p *otel.Provider
 }
 
-// newInstrumentation is the fx provider for the metric adapter.
-func newInstrumentation(m *metrics.Metrics) *instrumentation {
-	return &instrumentation{m: m}
+// newInstrumentation is the fx provider for the metric+span adapter. The
+// otel provider is always present in production wiring (a disabled one is
+// harmless), so both backends are wired unconditionally.
+func newInstrumentation(m *metrics.Metrics, p *otel.Provider) *instrumentation {
+	return &instrumentation{m: m, p: p}
 }
-
-// --- service.Instrumentation ------------------------------------------------
 
 func (i *instrumentation) WagerOutcome(kind, status, failureCode, channel string) {
 	i.m.WagerResults.With("kind", kind, "status", status,
@@ -37,22 +46,21 @@ func (i *instrumentation) ReconciliationDivergence() {
 	i.m.ReconciliationDivergences.Add(1)
 }
 
-// --- messaging.Instrumentation ----------------------------------------------
-
-func (i *instrumentation) OutboxPublished() { i.m.OutboxPublished.Add(1) }
-func (i *instrumentation) OutboxFailed()    { i.m.OutboxFailures.Add(1) }
-
-func (i *instrumentation) OutboxStats(pending int64, lagSeconds float64) {
-	i.m.OutboxPending.Set(float64(pending))
-	i.m.OutboxLagSeconds.Set(lagSeconds)
+// StartSpan opens a child of the span active in ctx (if any) and returns a
+// facade over it. The provider installs a no-op tracer when disabled, so
+// this always yields a usable span and no call site needs a nil check.
+func (i *instrumentation) StartSpan(ctx context.Context, name string, attrs ...service.SpanAttr) (context.Context, service.Span) {
+	ctx, sp := i.p.Tracer().Start(ctx, name, otel.SpanStartOptions(attrs...))
+	return ctx, &span{sp}
 }
 
-// --- messaging.ConsumerMetrics ----------------------------------------------
+// span adapts the OpenTelemetry span to the service.Span facade. Keeping the
+// facade tiny means a change in the tracing API touches only this file.
+type span struct{ s otel.Span }
 
-func (i *instrumentation) Received()         { i.m.ConsumerReceived.Add(1) }
-func (i *instrumentation) Retry()            { i.m.ConsumerRetries.Add(1) }
-func (i *instrumentation) DLQ(reason string) { i.m.ConsumerDLQ.Add(1) }
-
-// Invalid records a structurally invalid payload. Poison bodies are already
-// counted by ConsumerDLQ; the parameter stays for the port contract.
-func (i *instrumentation) Invalid(reason string) { _ = reason }
+func (s *span) SetAttributes(attrs ...service.SpanAttr) {
+	s.s.SetAttributes(otel.KeyValues(attrs...)...)
+}
+func (s *span) SetOutcome(status, failureCode string) { otel.RecordOutcome(s.s, status, failureCode) }
+func (s *span) RecordError(err error)                 { otel.RecordError(s.s, err) }
+func (s *span) End()                                  { s.s.End() }

@@ -334,6 +334,21 @@ func (silentOutbox) OutboxPublished()                       {}
 func (silentOutbox) OutboxFailed()                          {}
 func (silentOutbox) OutboxStats(pending int64, lag float64) {}
 
+// StartSpan returns a no-op span: these workers are driven against real SQS
+// and Postgres; tracing is not the subject under test.
+func (silentOutbox) StartSpan(ctx context.Context, _ string, _ ...messaging.SpanAttr) (context.Context, messaging.Span) {
+	return ctx, silentOutboxSpan{}
+}
+
+type silentOutboxSpan struct{}
+
+func (silentOutboxSpan) SetAttributes(...messaging.SpanAttr) {}
+func (silentOutboxSpan) SetOutcome(string, string)           {}
+func (silentOutboxSpan) RecordError(error)                   {}
+func (silentOutboxSpan) End()                                {}
+
+var _ messaging.Instrumentation = silentOutbox{}
+
 // TestCrossChannelSameOperation exercises the requirement that HTTP and SQS
 // share one idempotency space: the SAME operation (same provider, external
 // id and idempotency key) arrives once per channel, in both orders.

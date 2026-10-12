@@ -44,15 +44,20 @@ func (w *OutboxWorker) Run(ctx context.Context) error {
 }
 
 func (w *OutboxWorker) tick(ctx context.Context) {
+	ctx, span := w.hook.StartSpan(ctx, SpanOutboxTick)
+	defer span.End()
+
 	r := w.txm.Repos()
 	now := time.Now().UTC()
 	items, err := r.Outbox().ClaimBatch(ctx, now, w.cfg.OutboxLease, w.cfg.OutboxBatch)
 	if err != nil {
+		span.RecordError(err)
 		if ctx.Err() == nil {
 			w.log.Warn("outbox claim failed", slog.String("error", err.Error()))
 		}
 		return
 	}
+	span.SetAttributes(Attr(AttrOutboxBatch, int64(len(items))))
 	for _, item := range items {
 		if err := w.publisher.Publish(ctx, item); err != nil {
 			// Retry with exponential backoff capped at 1h; the lease also

@@ -178,4 +178,40 @@ type Instrumentation interface {
 	ReferenceOutcome(outcome string)
 	// ReconciliationDivergence reports a ledger/balance mismatch.
 	ReconciliationDivergence()
+
+	// StartSpan opens a child span for a use case and returns the derived
+	// context plus a Span façade. It never returns a nil Span, so call sites
+	// never need a nil check (a disabled tracer yields a no-op span).
+	StartSpan(ctx context.Context, name string, attrs ...SpanAttr) (context.Context, Span)
+}
+
+// SpanAttr is one key/value attribute attached to a span. The port speaks
+// its own tiny vocabulary so the service layer never imports the tracing
+// SDK — the adapter translates these into the provider's attribute type.
+type SpanAttr struct {
+	Key string
+	Val any
+}
+
+// AttrKey/AttrVal expose the pair structurally so the otel adapter can
+// accept any {Key, Val} carrier without importing this package's type.
+func (a SpanAttr) AttrKey() string { return a.Key }
+func (a SpanAttr) AttrVal() any    { return a.Val }
+
+// Attr is the terse constructor used at call sites: Attr(AttrKind, "BET").
+func Attr(key string, val any) SpanAttr { return SpanAttr{Key: key, Val: val} }
+
+// Span is the minimal façade of a tracing span. It is intentionally small:
+// the use cases annotate outcomes and record faults, nothing else.
+type Span interface {
+	// SetAttributes adds attributes after the span was started.
+	SetAttributes(attrs ...SpanAttr)
+	// SetOutcome stamps the classified business result. A rejected or failed
+	// outcome marks the span as errored (so the rejection is visible in the
+	// trace), while a processed outcome leaves it successful.
+	SetOutcome(status, failureCode string)
+	// RecordError marks the span as failed and attaches the cause.
+	RecordError(err error)
+	// End closes the span; it must be called exactly once (use defer).
+	End()
 }

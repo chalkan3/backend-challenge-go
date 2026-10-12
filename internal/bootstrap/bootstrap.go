@@ -21,6 +21,7 @@ import (
 	"github.com/chalkan3/backend-challenge-go/internal/platform/config"
 	"github.com/chalkan3/backend-challenge-go/internal/platform/logging"
 	"github.com/chalkan3/backend-challenge-go/internal/platform/metrics"
+	"github.com/chalkan3/backend-challenge-go/internal/platform/otel"
 	"github.com/chalkan3/backend-challenge-go/internal/postgres"
 	"github.com/chalkan3/backend-challenge-go/internal/service"
 	"github.com/chalkan3/backend-challenge-go/internal/sqs"
@@ -32,10 +33,12 @@ func NewHTTPDeps(
 	cfg *config.Config, log *slog.Logger, a *auth.Authenticator,
 	ws *service.WalletService, wg *service.WagerService, m *metrics.Metrics,
 	pool *pgxpool.Pool, client *awssqs.Client, urls sqs.QueueURLs,
+	tp *otel.Provider,
 ) wallethttp.Deps {
 	return wallethttp.Deps{
 		Cfg: cfg, Log: log.With(slog.String("component", "http")), Auth: a,
 		Ep: wallethttp.NewEndpoints(ws, wg, m), Pool: pool, SQS: client, URLs: urls, Reg: m.Registry(),
+		OTel: tp, Met: m,
 	}
 }
 
@@ -64,13 +67,20 @@ var App = fx.Options(
 	fx.Module("platform",
 		fx.Provide(func() context.Context { return context.Background() }),
 		fx.Provide(config.Load),
-		fx.Provide(logging.New),
 		fx.Provide(metrics.New),
+		fx.Provide(logging.New),
 		fx.Provide(
 			fx.Annotate(newInstrumentation, fx.As(new(service.Instrumentation))),
-			fx.Annotate(newInstrumentation, fx.As(new(messaging.Instrumentation))),
-			fx.Annotate(newInstrumentation, fx.As(new(messaging.ConsumerMetrics))),
+			fx.Annotate(newMessagingAdapter, fx.As(new(messaging.Instrumentation))),
+			fx.Annotate(newMessagingAdapter, fx.As(new(messaging.ConsumerMetrics))),
 		),
+	),
+	// Telemetry comes after logging's inputs exist: the tracer provider is an
+	// input of the logger, so the two are ordered by Fx, not by hand.
+	fx.Module("telemetry",
+		fx.Provide(newTelemetryProvider),
+		fx.Provide(newLoggerProvider),
+		fx.Invoke(registerTelemetry),
 	),
 	fx.Module("auth", fx.Provide(auth.NewAuthenticator)),
 	fx.Module("postgres",
