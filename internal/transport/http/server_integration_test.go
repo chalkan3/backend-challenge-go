@@ -1,0 +1,263 @@
+//go:build integration
+
+// The router is assembled by bootstrap in production; the integration suite
+// drives the composed app over the network (so its coverage lands in the app
+// container, not this binary). This test builds the router in-process with the
+// real dependencies and a real Keycloak-shaped JWKS, so the route table, the
+// auth middleware, the access log, the readiness probe and the tracing
+// wrapper are exercised where coverage is recorded.
+package http
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"encoding/json"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"testing"
+	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	awssqs "github.com/aws/aws-sdk-go-v2/service/sqs"
+	"github.com/google/uuid"
+	"github.com/lestrrat-go/jwx/v2/jwa"
+	"github.com/lestrrat-go/jwx/v2/jwk"
+	"github.com/lestrrat-go/jwx/v2/jwt"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/chalkan3/backend-challenge-go/internal/auth"
+	"github.com/chalkan3/backend-challenge-go/internal/platform/config"
+	"github.com/chalkan3/backend-challenge-go/internal/platform/metrics"
+	"github.com/chalkan3/backend-challenge-go/internal/postgres"
+	"github.com/chalkan3/backend-challenge-go/internal/service"
+	sqsinfra "github.com/chalkan3/backend-challenge-go/internal/sqs"
+)
+
+// --- token minting over a live JWKS -----------------------------------------
+
+type routerIDP struct {
+	auth   *auth.Authenticator
+	key    jwk.Key
+	issuer string
+}
+
+func newRouterIDP(t *testing.T) *routerIDP {
+	t.Helper()
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	pub, err := jwk.PublicKeyOf(priv)
+	require.NoError(t, err)
+	require.NoError(t, pub.Set(jwk.KeyIDKey, "router-test-key"))
+	require.NoError(t, pub.Set(jwk.AlgorithmKey, jwa.RS256))
+
+	set := jwk.NewSet()
+	require.NoError(t, set.AddKey(pub))
+	raw, err := json.Marshal(set)
+	require.NoError(t, err)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(raw)
+	}))
+	t.Cleanup(srv.Close)
+
+	issuer := srv.URL + "/realms/wallet"
+	cfg := &config.Config{AuthIssuer: issuer, AuthJWKSURL: srv.URL + "/certs"}
+	a, err := auth.NewAuthenticator(context.Background(), cfg, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+
+	signing, err := jwk.FromRaw(priv)
+	require.NoError(t, err)
+	require.NoError(t, signing.Set(jwk.KeyIDKey, "router-test-key"))
+	require.NoError(t, signing.Set(jwk.AlgorithmKey, jwa.RS256))
+
+	return &routerIDP{auth: a, key: signing, issuer: issuer}
+}
+
+func (i *routerIDP) token(t *testing.T, claims map[string]any) string {
+	t.Helper()
+	b := jwt.NewBuilder().
+		Issuer(i.issuer).
+		IssuedAt(time.Now().Add(-time.Minute)).
+		Expiration(time.Now().Add(10 * time.Minute))
+	for k, v := range claims {
+		b.Claim(k, v)
+	}
+	tok, err := b.Build()
+	require.NoError(t, err)
+	signed, err := jwt.Sign(tok, jwt.WithKey(jwa.RS256, i.key))
+	require.NoError(t, err)
+	return string(signed)
+}
+
+// --- router harness ---------------------------------------------------------
+
+func routerSQS(t *testing.T) *awssqs.Client {
+	t.Helper()
+	endpoint := os.Getenv("WALLET_TEST_SQS_ENDPOINT")
+	if endpoint == "" {
+		endpoint = "http://localhost:4566"
+	}
+	cfg, err := awsconfig.LoadDefaultConfig(context.Background(),
+		awsconfig.WithRegion("us-east-1"),
+		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test", "test", "")),
+	)
+	require.NoError(t, err)
+	return awssqs.NewFromConfig(cfg, func(o *awssqs.Options) { o.BaseEndpoint = aws.String(endpoint) })
+}
+
+func newRouterDeps(t *testing.T, mode config.Mode) (Deps, *routerIDP) {
+	t.Helper()
+	store := postgres.NewStore(endpointPool(t))
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	hook := silentHook{}
+	ws := service.NewWalletService(store, log, hook)
+	wg := service.NewWagerService(store, log, hook)
+	m := metrics.New()
+	idp := newRouterIDP(t)
+
+	cfg := &config.Config{
+		Mode:            mode,
+		HTTPAddr:        ":0",
+		LogLevel:        "info",
+		SQSRequestQueue: "wager-transactions.fifo",
+	}
+	d := Deps{
+		Cfg:  cfg,
+		Log:  log,
+		Auth: idp.auth,
+		Ep:   NewEndpoints(ws, wg, m),
+		Pool: endpointPool(t),
+		SQS:  routerSQS(t),
+		URLs: sqsinfra.QueueURLs{},
+		Reg:  m.Registry(),
+		OTel: nil,
+		Met:  m,
+	}
+	return d, idp
+}
+
+func do(t *testing.T, h http.Handler, method, path, bearer string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, path, nil)
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+// --- tests ------------------------------------------------------------------
+
+func TestRouterServesPublicRoutesInEveryMode(t *testing.T) {
+	d, _ := newRouterDeps(t, config.ModeAll)
+	r := NewRouter(d)
+
+	live := do(t, r, "GET", "/health/live", "")
+	assert.Equal(t, http.StatusOK, live.Code)
+	assert.JSONEq(t, `{"status":"live"}`, live.Body.String())
+
+	// /metrics must be scrapable without identity.
+	metricsResp := do(t, r, "GET", "/metrics", "")
+	assert.Equal(t, http.StatusOK, metricsResp.Code)
+}
+
+func TestRouterReadyProbesDependencies(t *testing.T) {
+	d, _ := newRouterDeps(t, config.ModeAll)
+	r := NewRouter(d)
+
+	// Postgres and SQS are up in the integration environment → ready.
+	rec := do(t, r, "GET", "/health/ready", "")
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.JSONEq(t, `{"status":"ready"}`, rec.Body.String())
+}
+
+func TestRouterBusinessRoutesRequireIdentity(t *testing.T) {
+	d, idp := newRouterDeps(t, config.ModeAll)
+	r := NewRouter(d)
+
+	// No bearer token → 401 from the HTTP auth middleware.
+	rec := do(t, r, "GET", "/wallets/"+uuid.NewString(), "")
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+
+	// Invalid bearer token → 401.
+	rec = do(t, r, "GET", "/wallets/"+uuid.NewString(), "garbage")
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+
+	// Valid internal token → the endpoint runs; unknown wallet → 404.
+	internal := idp.token(t, map[string]any{"azp": "wallet-internal", "wallet:internal": true})
+	rec = do(t, r, "GET", "/wallets/"+uuid.NewString(), internal)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+
+	// Authenticated, but not authorized for wallet routes → 403.
+	provider := idp.token(t, map[string]any{"azp": "provider-a", "providerId": "provider-a"})
+	rec = do(t, r, "GET", "/wallets/"+uuid.NewString(), provider)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+func TestRouterUnknownRouteIsNotFound(t *testing.T) {
+	d, _ := newRouterDeps(t, config.ModeAll)
+	r := NewRouter(d)
+
+	rec := do(t, r, "GET", "/no/such/route", "")
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NOT_FOUND")
+}
+
+func TestRouterWorkersModeSkipsBusinessRoutes(t *testing.T) {
+	d, idp := newRouterDeps(t, config.ModeWorkers)
+	r := NewRouter(d)
+
+	// Health still served (probes must not depend on the role).
+	rec := do(t, r, "GET", "/health/live", "")
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	// Business route is not even mounted → 404 even WITH a valid token.
+	internal := idp.token(t, map[string]any{"azp": "wallet-internal", "wallet:internal": true})
+	rec = do(t, r, "GET", "/wallets/"+uuid.NewString(), internal)
+	assert.Equal(t, http.StatusNotFound, rec.Code, "a worker must not take business traffic")
+}
+
+func TestNewServerPopulatesTimeouts(t *testing.T) {
+	d, _ := newRouterDeps(t, config.ModeAll)
+	srv := NewServer(d)
+	require.NotNil(t, srv)
+	assert.Equal(t, ":0", srv.Addr)
+	assert.NotNil(t, srv.Handler)
+	assert.NotZero(t, srv.ReadHeaderTimeout)
+	assert.NotZero(t, srv.ReadTimeout)
+	assert.NotZero(t, srv.WriteTimeout)
+	assert.NotZero(t, srv.IdleTimeout)
+}
+
+func TestBearerTokenParsing(t *testing.T) {
+	t.Parallel()
+	req := httptest.NewRequest("GET", "/", nil)
+	assert.Empty(t, bearerToken(req))
+
+	req.Header.Set("Authorization", "Bearer abc")
+	assert.Equal(t, "abc", bearerToken(req))
+
+	req.Header.Set("Authorization", "Basic abc")
+	assert.Empty(t, bearerToken(req))
+
+	// "Bearer " with nothing after it is not a token.
+	req.Header.Set("Authorization", "Bearer ")
+	assert.Empty(t, bearerToken(req))
+}
+
+func TestStatusWriterRecordsCode(t *testing.T) {
+	t.Parallel()
+	rec := httptest.NewRecorder()
+	sw := &statusWriter{ResponseWriter: rec, status: http.StatusOK}
+	sw.WriteHeader(http.StatusTeapot)
+	assert.Equal(t, http.StatusTeapot, sw.status)
+}
