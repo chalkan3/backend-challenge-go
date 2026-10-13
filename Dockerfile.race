@@ -1,0 +1,36 @@
+# Race-instrumented build for the distributed-concurrency verification.
+#
+# NOT the production image. `-race` needs cgo, and cgo needs glibc: the normal
+# Dockerfile builds CGO_ENABLED=0 on alpine (musl) and a race binary will not
+# even start there. So this file exists to answer one question the normal image
+# cannot — "do the replicas have an internal data race under real concurrency?"
+# — and stays out of the delivered artefact.
+#
+#   make race-replicas            # runs the whole verification
+#
+# Usage: docker build -f Dockerfile.race -t wallet_race .
+#
+# The build stage is the Debian golang image (has gcc); the runtime stage is
+# Debian slim, so the dynamically linked race runtime finds the libc it was
+# built against. The race runtime itself is linked into the binary, so no extra
+# packages are needed at run time beyond a shell for the entrypoint.
+FROM golang:1.26 AS build
+WORKDIR /src
+# CGO must be ON: the race detector is implemented with cgo hooks.
+ENV CGO_ENABLED=1
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+# -race instruments every memory access. Combined with the canary in
+# cmd/walletd, this is what lets us tell "no race" apart from "not looking".
+RUN go build -race -trimpath -ldflags="-s -w" -o /out/walletd ./cmd/walletd
+
+FROM debian:bookworm-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -u 10001 -m app
+COPY --from=build /out/walletd /usr/local/bin/walletd
+USER app
+EXPOSE 8080
+ENTRYPOINT ["walletd"]

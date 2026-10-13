@@ -17,6 +17,11 @@ import (
 )
 
 func main() {
+	// Deliberate data race, off unless WALLET_RACE_CANARY=1. It exists so the
+	// race-instrumented verification can prove the detector is actually
+	// watching before it trusts a silent run. See race_canary.go.
+	raceCanary()
+
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "migrate":

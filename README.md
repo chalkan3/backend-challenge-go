@@ -43,6 +43,7 @@ transactional outbox, inbox durável e controle de concorrência por carteira.
   - [Testes de integração (containers reais)](#testes-de-integração-containers-reais--sem-mock-de-infra)
   - [Testes de carga (k6)](#testes-de-carga-k6)
 - [Integração contínua](#-integração-contínua)
+- [Verificação com race detector (réplicas)](#-verificação-com-race-detector-réplicas)
 - [Simulações de falha](#-simulações-de-falha)
 - [Decisões técnicas](#-decisões-técnicas)
   - [Partidas dobradas (diferencial opcional)](#partidas-dobradas-diferencial-opcional)
@@ -282,6 +283,10 @@ O container da aplicação **aplica as migrations no start**, importa o realm
 ```sh
 docker compose --profile multi up --build -d   # app-1 (:8081), app-2 (:8082), app-3 (:8083)
 ```
+
+Para a variante que roda as réplicas **sob o race detector** — e prova que o
+silêncio do detector é significativo — veja
+[Verificação com race detector](#-verificação-com-race-detector-réplicas).
 
 ### Um binário, três modos (e por que não três binários)
 
@@ -819,6 +824,67 @@ go test -race -count=1 ./...
 make e2e          # job e2e
 make e2e SPLIT=1  # job e2e-split
 UP_ONLY=1 make e2e && make load-smoke && make load-hot && make load-verify  # job load
+```
+
+---
+
+## 🧪 Verificação com race detector (réplicas)
+
+O repo já prova duas coisas **separadamente**: `go test -race` pega corridas de
+memória *dentro do processo de teste*, e o `TestMultiInstanceConcurrency` (mais
+o cenário k6 `distributed`) prova que o lock de linha impede **três réplicas** de
+perder um update. Falta o vão entre as duas: rodar os **próprios binários do
+serviço** sob `-race`, **três de uma vez**, batendo na mesma carteira.
+
+```sh
+make race-replicas        # canário + 3 réplicas + carga + verificação
+```
+
+O script afirma **duas propriedades distintas**, porque nenhuma implica a outra:
+
+| # | Propriedade | O que ela significa |
+| :- | :-- | :-- |
+| 1 | **Interna** | cada réplica, sob tráfego concorrente real (handlers HTTP + relay do outbox + consumer SQS rodando juntos), **não reporta data race** nas suas próprias goroutines |
+| 2 | **Externa** | as três réplicas **concordam no saldo** — o lock vale *entre processos*, não só dentro de um |
+
+### O canário: por que um "silêncio" vale como evidência
+
+Um detector de race que **não vê nada** e um detector que **não está rodando**
+produzem a mesma saída: nenhuma. Então um "rodei `-race` e não apareceu aviso"
+só tem valor se antes for possível **fazer o detector gritar**.
+
+A Fase A do script faz exatamente isso: roda a mesma imagem com
+`WALLET_RACE_CANARY=1`, que provoca uma corrida **real** entre duas goroutines
+numa variável (`cmd/walletd/race_canary.go`), e exige ver `WARNING: DATA RACE`.
+Se não vir, **aborta** — não reporta um verde que não significaria nada. A Fase A
+também valida a direção oposta (o canário desligado tem que ser silencioso),
+o que fecha o caso de uma imagem que imprime race incondicionalmente.
+
+Esse passo é, além disso, o que **valida o próprio `Dockerfile.race`**: se cgo ou
+glibc estivessem errados, o canário falharia ali.
+
+> [!NOTE]
+> O `Dockerfile.race` **não** é a imagem de produção. `-race` exige cgo, e cgo
+exige glibc — o `Dockerfile` normal compila `CGO_ENABLED=0` sobre alpine (musl)
+e um binário instrumentado **não sobe** ali. Por isso a verificação tem imagem
+própria (Debian), e ela **não** entra no artefato entregue: a afirmação é sobre a
+*verificação*, não sobre o binário.
+
+Saída real de uma execução (`make race-replicas`):
+
+```
+==> Phase A: canary — make the race detector WARN on purpose
+    ok: detector fired on the canary
+    ok: detector is silent when the canary is off
+==> Phase B: booting 3 race-instrumented replica(s)
+    replica 1 ready on :9081 ...
+==> Phase C: concurrent traffic (16 workers x 40 iters) on one wallet
+    distributed OK — 3 instances agree on 1640.00 (v641), 641 ledger entries, reconciliation consistent
+==> Checking every replica's log for data races
+    wallet_race_1    DATA RACE lines: 0
+    wallet_race_2    DATA RACE lines: 0
+    wallet_race_3    DATA RACE lines: 0
+==> race-replicas: PASS — detector proven live, replicas race-free, ledger consistent
 ```
 
 ---

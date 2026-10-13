@@ -1,10 +1,12 @@
-.PHONY: build fmt vet test test-race test-integration e2e up up-multi up-split down logs migrate-up migrate-down migrate-status kind-check kind-up kind-image kind-deploy kind-split kind-down kind-argocd kind-argocd-seed kind-status helm-lint engine-check preflight load-smoke load load-hot load-idempotency load-mixed load-distributed load-soak load-verify
+.PHONY: build fmt vet test test-race test-integration e2e up up-multi up-split down logs migrate-up migrate-down migrate-status kind-check kind-up kind-image kind-deploy kind-split kind-down kind-argocd kind-argocd-seed kind-status helm-lint engine-check preflight load-smoke load load-hot load-idempotency load-mixed load-distributed load-soak load-verify race-image race-replicas
 
 # Engine/compose detection lives in scripts/engine.sh (podman vs docker). We ask
 # it once per recipe via $(shell ...) so `make up`, `make logs`, ... use exactly
 # the same implementation the scripts do — instead of assuming `docker compose`,
 # which breaks on podman-only hosts.
 COMPOSE := $(shell . ./scripts/engine.sh >/dev/null 2>&1 && echo "$$COMPOSE")
+# Bare engine CLI for `build`/`run`, which do not go through compose.
+ENGINE := $(shell . ./scripts/engine.sh >/dev/null 2>&1 && echo "$$CONTAINER_ENGINE")
 
 # Fails with a clear message if no compose implementation is available.
 engine-check:
@@ -185,3 +187,14 @@ load-soak:
 
 load-verify:
 	./scripts/load-verify.sh
+
+# Race-instrumented distributed verification. Builds a -race image (Debian, cgo;
+# NOT the production image) and runs the distributed scenario against replicas
+# that have the Go race detector active. The script first MAKES the detector fire
+# on a canary, so its silence under real load is evidence rather than absence of
+# evidence. See scripts/race-replicas.sh for the full rationale.
+race-image:
+	$(ENGINE) build -f Dockerfile.race -t wallet_race:latest .
+
+race-replicas: race-image
+	REPLICAS=$(or $(REPLICAS),3) ./scripts/race-replicas.sh
