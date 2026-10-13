@@ -5,7 +5,21 @@ ENV CGO_ENABLED=0
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN go build -trimpath -ldflags="-s -w" -o /out/walletd ./cmd/walletd
+
+# Build identity, injected into internal/platform/buildinfo at link time.
+# Local `docker build` leaves them at their honest defaults ("dev"/"none");
+# the release workflow passes the real tag, commit and timestamp so a shipped
+# image reports its own version via `walletd version`. VERSION is the only one
+# with a meaningful default because it is the one a human reads.
+ARG VERSION=dev
+ARG COMMIT=none
+ARG DATE=unknown
+RUN go build -trimpath \
+        -ldflags="-s -w \
+          -X github.com/chalkan3/backend-challenge-go/internal/platform/buildinfo.Version=${VERSION} \
+          -X github.com/chalkan3/backend-challenge-go/internal/platform/buildinfo.Commit=${COMMIT} \
+          -X github.com/chalkan3/backend-challenge-go/internal/platform/buildinfo.Date=${DATE}" \
+        -o /out/walletd ./cmd/walletd
 
 # Runtime stage — minimal image with a non-root user and curl for healthchecks.
 FROM alpine:3.21

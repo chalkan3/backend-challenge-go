@@ -1,0 +1,129 @@
+# GoReleaser — turns a semver tag into a GitHub Release with real binaries.
+#
+# The value this adds over the plain image release is stated plainly: it
+# produces cross-platform, versioned binaries and the metadata around them
+# (checksums, SBOM, changelog). The binary knows its own version because the
+# -ldflags below rewrite internal/platform/buildinfo, which is what makes
+# `walletd version` inside any artifact answer "what am I running?" without
+# guesswork.
+#
+# Validate a change locally without publishing:
+#   goreleaser release --snapshot --clean
+# Check the config parses:
+#   goreleaser check
+version: 2
+
+project_name: walletd
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: walletd
+    # One binary, three modes (api / workers / all) — see internal/platform/config.
+    main: ./cmd/walletd
+    binary: walletd
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      # -s -w strip the symbol table and DWARF, matching the Dockerfile.
+      # The -X flags are the whole point: they make the binary versioned.
+      - -s -w
+      - -X github.com/chalkan3/backend-challenge-go/internal/platform/buildinfo.Version={{ .Version }}
+      - -X github.com/chalkan3/backend-challenge-go/internal/platform/buildinfo.Commit={{ .Commit }}
+      - -X github.com/chalkan3/backend-challenge-go/internal/platform/buildinfo.Date={{ .CommitDate }}
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    # Include only the binary and the license family of files: shipping the
+    # whole source tree in a binary archive bloats it and helps nobody.
+    files:
+      - LICENSE*
+      - README.md
+      - CHANGELOG*
+    format_overrides:
+      - goos: darwin
+        formats: [tar.gz]
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+sboms:
+  # An SBOM per archive answers "what is actually inside the artifact?" — the
+  # same supply-chain question the image release already answers for the image.
+  - artifacts: archive
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot"
+
+changelog:
+  sort: asc
+  use: github
+  groups:
+    - title: ":rocket: Features"
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: ":bug: Bug fixes"
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 1
+    - title: ":zap: Performance"
+      regexp: '^.*?perf(\([[:word:]]+\))??!?:.+$'
+      order: 2
+    - title: ":books: Documentation"
+      regexp: '^.*?docs(\([[:word:]]+\))??!?:.+$'
+      order: 3
+    - title: ":construction_worker: CI / Build"
+      regexp: '^.*?(ci|build|chore)(\([[:word:]]+\))??!?:.+$'
+      order: 4
+    - title: ":recycle: Refactor"
+      regexp: '^.*?refactor(\([[:word:]]+\))??!?:.+$'
+      order: 5
+    - title: ":white_check_mark: Tests"
+      regexp: '^.*?test(\([[:word:]]+\))??!?:.+$'
+      order: 6
+    - title: "Other changes"
+      order: 999
+  filters:
+    exclude:
+      - "^docs\\(octopus\\)"
+      - "^chore\\(deps\\)"
+      - "merge conflict"
+      - Merge pull request
+      - Merge remote-tracking branch
+      - Merge branch
+
+release:
+  github:
+    owner: chalkan3
+    name: backend-challenge-go
+  # Draft first: a human decides when it goes public, matching the release
+  # workflow's "releases are deliberate acts" stance.
+  draft: false
+  prerelease: auto
+  name_template: "{{ .ProjectName }} {{ .Tag }}"
+  footer: |
+    ## Container image
+
+    The same tag is published as a multi-arch image:
+
+    ```
+    docker pull ghcr.io/chalkan3/backend-challenge-go:{{ .Tag }}
+    ```
+
+    Verification, from the source of the challenge:
+
+    ```
+    walletd version        # prints the tag, commit and build date baked in here
+    sha256sum -c checksums.txt
+    ```

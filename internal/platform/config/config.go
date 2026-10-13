@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chalkan3/backend-challenge-go/internal/platform/buildinfo"
 	"github.com/chalkan3/backend-challenge-go/internal/platform/otel"
 )
 
@@ -214,7 +215,7 @@ func (c *Config) Telemetry() otel.Config {
 		Endpoint:       c.TelemetryEndpoint,
 		Insecure:       c.TelemetryInsecure,
 		ServiceName:    c.TelemetryServiceName,
-		ServiceVersion: Version,
+		ServiceVersion: Version(),
 		Environment:    c.TelemetryEnvironment,
 		InstanceID:     c.TelemetryInstanceID,
 		SampleRatio:    c.TelemetrySampleRatio,
@@ -225,8 +226,10 @@ func (c *Config) Telemetry() otel.Config {
 }
 
 // Version is the build version reported as the service.version telemetry
-// resource attribute.
-const Version = "dev"
+// resource attribute. It is resolved from the linker-injected build info (see
+// internal/platform/buildinfo), so a released binary reports its real tag
+// instead of a hardcoded string.
+func Version() string { return buildinfo.EffectiveVersion() }
 
 func env(key, def string) string {
 	if v, ok := os.LookupEnv(key); ok && v != "" {

@@ -12,6 +12,7 @@ import (
 	"go.uber.org/fx"
 
 	"github.com/chalkan3/backend-challenge-go/internal/bootstrap"
+	"github.com/chalkan3/backend-challenge-go/internal/platform/buildinfo"
 	"github.com/chalkan3/backend-challenge-go/internal/platform/config"
 	"github.com/chalkan3/backend-challenge-go/internal/postgres"
 )
@@ -28,7 +29,11 @@ func main() {
 			runMigrate()
 			return
 		case "version":
-			fmt.Println("walletd dev")
+			// Prints the identity the binary was linked with (see
+			// internal/platform/buildinfo). Dependency-free on purpose: it must
+			// answer without a database or any configuration, which is what
+			// makes it usable as an ops probe from a bare container.
+			fmt.Println(buildinfo.String())
 			return
 		}
 	}
