@@ -11,6 +11,9 @@ coverage.html
 .env
 .env.local
 
+# Artefato de build da imagem kind (contém a tag do SHA local)
+/.kind-image
+
 # Artefatos de ferramentas de agente/editor — não fazem parte do projeto
 octopus-skills/
 .idea/

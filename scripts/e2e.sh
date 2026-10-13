@@ -9,27 +9,15 @@
 #   ./scripts/e2e.sh -run Journey # pass extra flags straight to `go test`
 #   KEEP=1 ./scripts/e2e.sh       # leave the stack running afterwards
 #
-# Works with podman-compose or docker compose; the detection order is
-# podman-compose, then docker compose, then docker-compose.
+# Engine/compose detection is centralised in scripts/engine.sh so every entry
+# point (this script, the Makefile) agrees on podman vs docker, and a port
+# pre-flight catches a kind cluster holding the compose ports.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-COMPOSE=""
-CONTAINER_ENGINE=""
-if command -v podman-compose >/dev/null 2>&1; then
-  COMPOSE="podman-compose"
-  CONTAINER_ENGINE="podman"
-elif docker compose version >/dev/null 2>&1; then
-  COMPOSE="docker compose"
-  CONTAINER_ENGINE="docker"
-elif command -v docker-compose >/dev/null 2>&1; then
-  COMPOSE="docker-compose"
-  CONTAINER_ENGINE="docker"
-else
-  echo "error: no compose implementation found (podman-compose or docker compose)" >&2
-  exit 1
-fi
+# shellcheck source=scripts/engine.sh
+. scripts/engine.sh
 echo "==> using: $COMPOSE (engine: $CONTAINER_ENGINE)"
 
 PROFILE_FLAGS=()
@@ -65,6 +53,11 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # ── 1. Bring the stack up ───────────────────────────────────────────────────
+# Fail fast if a kind cluster (or anything else) already owns the host ports;
+# otherwise the containers are created but never start, with no clear error.
+echo "==> checking host ports"
+PROFILES="${SPLIT:+split}${MULTI:+multi}" ./scripts/port-check.sh
+
 echo "==> bringing the stack up"
 $COMPOSE "${PROFILE_FLAGS[@]}" up -d --build postgres keycloak localstack "${APP_SERVICES[@]}"
 
