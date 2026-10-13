@@ -39,6 +39,7 @@ transactional outbox, inbox durável e controle de concorrência por carteira.
 - [Observabilidade](#-observabilidade)
 - [API](#-api)
 - [Testes](#-testes)
+  - [Testes de carga (k6)](#testes-de-carga-k6)
 - [Integração contínua](#-integração-contínua)
 - [Simulações de falha](#-simulações-de-falha)
 - [Decisões técnicas](#-decisões-técnicas)
@@ -218,6 +219,9 @@ internal/
   migrations/           # SQL goose embarcado (go:embed)
 test/integration/       # suíte end-to-end contra Postgres/Keycloak/LocalStack reais
                         # (inclui journey_test.go: histórias completas do produto)
+loadtest/               # testes de carga em k6 + auditoria de integridade em SQL
+  k6/scenarios/         # smoke, hot-wallet, idempotency, mixed, distributed, soak
+  sql/invariants.sql    # invariantes contábeis, rodadas direto no Postgres
 scripts/e2e.sh          # runner: sobe a stack, espera health, roda a suíte, derruba
 deploy/
   observability/        # otel-collector, prometheus, tempo, loki + provisioning Grafana
@@ -703,6 +707,46 @@ ponta como um operador o narraria, verificando o saldo a cada passo:
 | `TestJourneyHTTPContractIsHonest` | cada rota documentada responde o code esperado (pega divergência entre README e código) |
 | `TestJourneyHealthAndMetricsArePublic` | `/health/*` e `/metrics` são públicos; rota de negócio sem token → `401` |
 
+### Testes de carga (k6)
+
+`loadtest/` guarda os cenários de carga, escritos em **k6** — que roda a partir
+da imagem oficial, sem instalar nada na máquina. O princípio é que carga sem
+invariante não prova nada: cada cenário ataca uma garantia específica e falha
+verificando **estado**, não status HTTP.
+
+| Cenário | Garantia atacada |
+| :-- | :-- |
+| `smoke` | contrato inteiro (abertura, replay, conflito, 422, ledger, reconciliação) em segundos |
+| `hot-wallet` | lock por linha no pior caso: uma carteira, N VUs; o `teardown` confere `saldo`, `version` e a soma do ledger |
+| `idempotency` | as três cláusulas: replay, `409` na mesma chave com payload diferente, e o controle que pega dedup por hash |
+| `mixed` | tráfego de produção com linhas adversariais — cada recusa no seu código |
+| `distributed` | o lock **entre processos**: lê o saldo por todas as réplicas e falha se divergirem |
+| `soak` | deriva sob carga sustentada, reconciliando cada carteira no fim |
+
+O k6 mede a **API**; o que foi **commitado** é conferido por
+`loadtest/sql/invariants.sql`, rodado direto no Postgres — cadeia do ledger,
+saldo × soma, unicidade de chave de idempotência, `PROCESSED` sem lançamento.
+
+```sh
+make up                    # uma instância
+make load-smoke            # contrato completo, segundos
+make load                  # hot + idempotency + mixed
+
+make up-multi              # três réplicas
+make load-distributed      # lock entre processos
+
+make load-verify           # 9 auditorias de integridade, ~1M entradas
+```
+
+> [!NOTE]
+> Depois dos cenários o backlog do outbox fica na casa das centenas de milhares.
+> É **esperado** neste teste: os cenários produzem a ~2.600 req/s enquanto o
+> relay publica a ~200 eventos/s. Não é um bug — é a taxa do gerador superando a
+> de publicação. O `load-verify` reporta o número como `info`, sem reprovar.
+
+Detalhes de cada cenário, a calibração dos thresholds e o que **não** é coberto
+estão em [`loadtest/README.md`](loadtest/README.md).
+
 ---
 
 ## 🔁 Integração contínua
@@ -718,6 +762,7 @@ não existe um caminho só-de-CI que possa divergir da documentação.
 | `quality` | `gofmt -l`, `go vet` (com e sem `-tags=integration`), `go test -race ./...`, coverage como artefato | Feedback rápido e hermético, sem containers. O `vet` com tag pega erro de compilação nos testes de integração **antes** do job caro |
 | `e2e` | `./scripts/e2e.sh` — compose real (Postgres + Keycloak + LocalStack) + suíte completa | É o job que **prova** as afirmações do desafio em vez de afirmá-las; 25 testes com race detector |
 | `e2e-split` | `SPLIT=1 ./scripts/e2e.sh` | Exercita `WALLET_MODE=api` + `WALLET_MODE=workers` como processos separados — se passar, o argumento de topologia do README está verificado a cada push |
+| `load` | `make load-smoke`, `make load-hot`, `make load-verify` | Sobe a stack, roda o contrato no k6 e depois audita o que foi **commitado** — fecha a lacuna entre "respondeu certo" e "está consistente" |
 | `image` | build da imagem, uid ≠ 0, `walletd version`, boot com `WALLET_MODE` inválido | Invariantes de segurança e de operação viram **falha de build**, não comentário de revisão |
 
 O job `image` verifica três coisas que costumam ser só prometidas:
@@ -750,6 +795,7 @@ gofmt -l . && go vet ./... && go vet -tags=integration ./...   # job quality
 go test -race -count=1 ./...
 make e2e          # job e2e
 make e2e SPLIT=1  # job e2e-split
+UP_ONLY=1 make e2e && make load-smoke && make load-hot && make load-verify  # job load
 ```
 
 ---
