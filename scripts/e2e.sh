@@ -121,7 +121,7 @@ if [ "${UP_ONLY:-0}" = "1" ]; then
   exit 0
 fi
 
-if ! go test -race -count=1 -tags=integration -timeout 15m -v ./test/integration/... "$@"; then
+if ! go test -race -count=1 -tags=integration -timeout 15m -v ./test/integration/... ./internal/postgres/... ./internal/transport/http/... "$@"; then
   echo "" >&2
   echo "==> suite FAILED — last 80 lines of the app log (for triage):" >&2
   for svc in "${APP_SERVICES[@]}"; do

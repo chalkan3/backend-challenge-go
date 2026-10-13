@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -10,6 +11,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/chalkan3/backend-challenge-go/internal/domain"
+	"github.com/chalkan3/backend-challenge-go/internal/platform/config"
+	"github.com/chalkan3/backend-challenge-go/internal/platform/otel"
 	"github.com/chalkan3/backend-challenge-go/internal/service"
 )
 
@@ -65,4 +68,60 @@ func TestDirectionOrNull(t *testing.T) {
 	assert.Nil(t, directionOrNull(domain.Direction("")), "zero value encodes as SQL NULL")
 	assert.Equal(t, "DEBIT", directionOrNull(domain.DirectionDebit))
 	assert.Equal(t, "CREDIT", directionOrNull(domain.DirectionCredit))
+}
+
+// TestPgxDatabaseName pins the db.namespace fallback: a config that omits the
+// database name must still yield a meaningful attribute instead of an empty
+// string in every SQL span.
+func TestPgxDatabaseName(t *testing.T) {
+	assert.Equal(t, "wallet", pgxDatabaseName(""))
+	assert.Equal(t, "custom_db", pgxDatabaseName("custom_db"))
+}
+
+// TestNewPoolRejectsMalformedDSN pins the fail-fast contract of pool
+// construction: a DSN pgx cannot parse must be rejected before any connection
+// is attempted, so the process dies at boot rather than on the first query.
+func TestNewPoolRejectsMalformedDSN(t *testing.T) {
+	ctx := context.Background()
+	tp, err := otel.New(ctx, otel.Config{Enabled: false})
+	require.NoError(t, err)
+
+	// A DSN with a scheme pgx does not recognise fails ParseConfig.
+	_, err = NewPool(ctx, &config.Config{DBDSN: "not-a-dsn://:::"}, tp)
+	require.Error(t, err)
+}
+
+// TestNewPoolFailsOnUnreachableDatabase pins the second fail-fast gate: even a
+// well-formed DSN whose server is unreachable must fail Ping and close the
+// pool, never return a half-open pool that would fail later on the first
+// repository call (where the error would be far from its cause).
+func TestNewPoolFailsOnUnreachableDatabase(t *testing.T) {
+	ctx := context.Background()
+	tp, err := otel.New(ctx, otel.Config{Enabled: false})
+	require.NoError(t, err)
+
+	// Port 1 is reserved and never listening; the Ping will fail fast.
+	_, err = NewPool(ctx, &config.Config{
+		DBDSN:      "postgres://wallet:wallet@127.0.0.1:1/wallet?sslmode=disable",
+		DBMaxConns: 1,
+	}, tp)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "connect", "the failure must be the connect/ping error")
+}
+
+// TestOpenGooseFailsOnUnreachableDatabase pins openGoose's fail-fast: an
+// unreachable database must be reported as such (with the migrations context
+// wrapped in), not as a nil-pointer later during Up/Down.
+func TestOpenGooseFailsOnUnreachableDatabase(t *testing.T) {
+	_, _, err := openGoose("postgres://wallet:wallet@127.0.0.1:1/wallet?sslmode=disable")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "migrations",
+		"the error must name the migration subsystem for a fast diagnosis")
+}
+
+// TestMigrateUpFailsOnUnreachableDatabase confirms the whole entry point, not
+// just its helper, surfaces the failure instead of succeeding silently.
+func TestMigrateUpFailsOnUnreachableDatabase(t *testing.T) {
+	err := MigrateUp(context.Background(), "postgres://wallet:wallet@127.0.0.1:1/wallet?sslmode=disable")
+	require.Error(t, err)
 }
