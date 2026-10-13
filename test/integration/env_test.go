@@ -219,6 +219,14 @@ func newPlayerID(t *testing.T) string {
 	return uuid.NewString()
 }
 
+// errCode extracts error.code from the transport's error envelope
+// ({"error":{"code":...,"message":...}}), returning "" when absent.
+func errCode(body map[string]any) string {
+	e, _ := body["error"].(map[string]any)
+	code, _ := e["code"].(string)
+	return code
+}
+
 // openWallet creates a wallet with the internal identity.
 func openWallet(t *testing.T, internalTok, playerID, amount string) string {
 	t.Helper()

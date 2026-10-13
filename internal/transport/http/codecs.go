@@ -37,7 +37,7 @@ func correlationFrom(ctx context.Context) string {
 	return v
 }
 
-func decodeOpenWallet(_ context.Context, r *http.Request) (interface{}, error) {
+func decodeOpenWallet(ctx context.Context, r *http.Request) (interface{}, error) {
 	var body struct {
 		PlayerID       string    `json:"playerId"`
 		InitialBalance moneyWire `json:"initialBalance"`
@@ -49,9 +49,10 @@ func decodeOpenWallet(_ context.Context, r *http.Request) (interface{}, error) {
 		return nil, &validationError{Detail: "playerId and initialBalance{amount,currency} are required"}
 	}
 	return openWalletRequest{
-		PlayerID:      body.PlayerID,
-		InitialAmount: body.InitialBalance.Amount,
-		Currency:      body.InitialBalance.Currency,
+		PlayerID:       body.PlayerID,
+		InitialAmount:  body.InitialBalance.Amount,
+		Currency:       body.InitialBalance.Currency,
+		IdempotencyKey: idempotencyKeyFrom(ctx),
 	}, nil
 }
 

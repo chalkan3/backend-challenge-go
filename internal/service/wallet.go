@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/chalkan3/backend-challenge-go/internal/domain"
 )
 
@@ -80,59 +82,24 @@ func (s *WalletService) Open(ctx context.Context, in OpenWalletInput) (view Wall
 		return WalletView{}, &ValidationError{Detail: "initialBalance: " + err.Error()}
 	}
 	err = s.txm.WithinTx(ctx, func(ctx context.Context, r Repos) error {
-		if _, err := r.Wallets().GetByPlayerAndCurrency(ctx, playerID, in.Currency, false); err == nil {
-			return &ConflictError{Code: CodeWalletExists, Detail: "wallet already exists for this player and currency"}
-		} else if !errors.Is(err, ErrRepoNotFound) {
-			return err
+		// Durable idempotency: a replay of the same Idempotency-Key must
+		// reproduce the original result, never open a second wallet nor
+		// double the opening balance.
+		if in.IdempotencyKey != "" {
+			replay, revoked, err := s.replayOpen(ctx, r, in, playerID, &view)
+			if err != nil {
+				return err
+			}
+			if revoked {
+				now := time.Now().UTC()
+				return s.createWallet(ctx, r, in, playerID, initial, now, &view)
+			}
+			if replay {
+				return nil
+			}
 		}
 		now := time.Now().UTC()
-		w, mv, err := domain.OpenWallet(playerID, in.Currency, initial, now)
-		if err != nil {
-			return &ValidationError{Detail: err.Error()}
-		}
-		if err := r.Wallets().Create(ctx, w); err != nil {
-			if errors.Is(err, ErrDuplicateInsert) {
-				return &ConflictError{Code: CodeWalletExists, Detail: "wallet already exists for this player and currency"}
-			}
-			return err
-		}
-		if !mv.Direction.Valid() { // zero opening: no financial rows
-			view = walletView(w)
-			return nil
-		}
-		tx, err := domain.NewOpeningTransaction(w.PlayerID(), w.ID(), w.Currency(), initial, now)
-		if err != nil {
-			return err
-		}
-		entry, err := domain.NewLedgerEntry(w.ID(), tx.ID(), mv, now)
-		if err != nil {
-			return err
-		}
-		if err := tx.MarkProcessed(domain.ProcessedResult{
-			Direction: mv.Direction, ResultAmount: mv.Amount,
-			BalanceBefore: mv.BalanceBefore, BalanceAfter: mv.BalanceAfter, WalletVersion: mv.WalletVersion,
-		}, now); err != nil {
-			return err
-		}
-		if err := r.Transactions().Insert(ctx, tx); err != nil {
-			return err
-		}
-		if err := r.Ledger().Append(ctx, entry); err != nil {
-			return err
-		}
-		processed, err := domain.NewWagerTransactionProcessedEvent(tx)
-		if err != nil {
-			return err
-		}
-		balanceChanged, err := domain.NewWalletBalanceChangedEvent(tx, mv)
-		if err != nil {
-			return err
-		}
-		if err := r.Outbox().Enqueue(ctx, []domain.Envelope{processed, balanceChanged}); err != nil {
-			return err
-		}
-		view = walletView(w)
-		return nil
+		return s.createWallet(ctx, r, in, playerID, initial, now, &view)
 	})
 	if err != nil {
 		return WalletView{}, err
@@ -140,8 +107,115 @@ func (s *WalletService) Open(ctx context.Context, in OpenWalletInput) (view Wall
 	s.log.InfoContext(ctx, "wallet opened",
 		slog.String("walletId", view.ID.String()),
 		slog.String("playerId", view.PlayerID.String()),
-		slog.String("balance", view.Balance.String()))
+		slog.String("balance", view.Balance.String()),
+		slog.Bool("idempotentReplay", view.IdempotentReplay))
 	return view, nil
+}
+
+// replayOpen answers the idempotency question for a key-bearing opening:
+//   - not seen before      → (false, true, nil):  proceed and create, then record.
+//   - same payload replay  → (true,  false, nil): serve the stored wallet.
+//   - same key, new body   → 409 IDEMPOTENCY_KEY_CONFLICT.
+//
+// The returned "revoked" flag means the caller must create the wallet (first
+// attempt); a false "replay" with no error means nothing to do.
+func (s *WalletService) replayOpen(ctx context.Context, r Repos, in OpenWalletInput, playerID uuid.UUID, out *WalletView) (replay, revoked bool, err error) {
+	hash, err := openPayloadHash(in, playerID)
+	if err != nil {
+		return false, false, err
+	}
+	walletID, storedHash, err := r.WalletOpens().Lookup(ctx, in.IdempotencyKey)
+	if errors.Is(err, ErrRepoNotFound) {
+		return false, true, nil // first time we see this key: create it
+	}
+	if err != nil {
+		return false, false, err
+	}
+	if storedHash != hash {
+		return false, false, &ConflictError{Code: CodeIdemKeyConflict,
+			Detail: "Idempotency-Key was already used with a different payload"}
+	}
+	w, err := r.Wallets().GetByID(ctx, walletID)
+	if err != nil {
+		return false, false, err
+	}
+	s.hook.Duplicate("idempotent_replay")
+	view := walletView(w)
+	view.IdempotentReplay = true
+	*out = view
+	return true, false, nil
+}
+
+// createWallet performs the actual opening: uniqueness guard, wallet,
+// OPENING transaction, ledger entry, outbox events and — when the caller
+// supplied a key — the durable idempotency record, all in one transaction.
+func (s *WalletService) createWallet(
+	ctx context.Context, r Repos, in OpenWalletInput, playerID uuid.UUID,
+	initial domain.Money, now time.Time, out *WalletView,
+) error {
+	if _, err := r.Wallets().GetByPlayerAndCurrency(ctx, playerID, in.Currency, false); err == nil {
+		return &ConflictError{Code: CodeWalletExists, Detail: "wallet already exists for this player and currency"}
+	} else if !errors.Is(err, ErrRepoNotFound) {
+		return err
+	}
+	w, mv, err := domain.OpenWallet(playerID, in.Currency, initial, now)
+	if err != nil {
+		return &ValidationError{Detail: err.Error()}
+	}
+	if err := r.Wallets().Create(ctx, w); err != nil {
+		if errors.Is(err, ErrDuplicateInsert) {
+			return &ConflictError{Code: CodeWalletExists, Detail: "wallet already exists for this player and currency"}
+		}
+		return err
+	}
+	// Record the idempotency key in the SAME transaction as the wallet, so
+	// the key and the money commit or roll back together.
+	if in.IdempotencyKey != "" {
+		hash, err := openPayloadHash(in, playerID)
+		if err != nil {
+			return err
+		}
+		if err := r.WalletOpens().Record(ctx, in.IdempotencyKey, hash, w.ID()); err != nil {
+			return err
+		}
+	}
+	if !mv.Direction.Valid() { // zero opening: no financial rows
+		*out = walletView(w)
+		return nil
+	}
+	tx, err := domain.NewOpeningTransaction(w.PlayerID(), w.ID(), w.Currency(), initial, now)
+	if err != nil {
+		return err
+	}
+	entry, err := domain.NewLedgerEntry(w.ID(), tx.ID(), mv, now)
+	if err != nil {
+		return err
+	}
+	if err := tx.MarkProcessed(domain.ProcessedResult{
+		Direction: mv.Direction, ResultAmount: mv.Amount,
+		BalanceBefore: mv.BalanceBefore, BalanceAfter: mv.BalanceAfter, WalletVersion: mv.WalletVersion,
+	}, now); err != nil {
+		return err
+	}
+	if err := r.Transactions().Insert(ctx, tx); err != nil {
+		return err
+	}
+	if err := r.Ledger().Append(ctx, entry); err != nil {
+		return err
+	}
+	processed, err := domain.NewWagerTransactionProcessedEvent(tx)
+	if err != nil {
+		return err
+	}
+	balanceChanged, err := domain.NewWalletBalanceChangedEvent(tx, mv)
+	if err != nil {
+		return err
+	}
+	if err := r.Outbox().Enqueue(ctx, []domain.Envelope{processed, balanceChanged}); err != nil {
+		return err
+	}
+	*out = walletView(w)
+	return nil
 }
 
 // Get reads a wallet.

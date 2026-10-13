@@ -44,6 +44,7 @@ type repos struct {
 }
 
 func (r *repos) Wallets() service.WalletRepository           { return &walletRepo{ex: r.ex} }
+func (r *repos) WalletOpens() service.WalletOpenRepository   { return &walletOpenRepo{ex: r.ex} }
 func (r *repos) Transactions() service.TransactionRepository { return &txRepo{ex: r.ex} }
 func (r *repos) Ledger() service.LedgerRepository            { return &ledgerRepo{ex: r.ex} }
 func (r *repos) Inbox() service.InboxRepository              { return &inboxRepo{ex: r.ex} }

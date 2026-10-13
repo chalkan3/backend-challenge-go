@@ -18,11 +18,12 @@ import (
 // --- requests --------------------------------------------------------------
 
 type openWalletRequest struct {
-	PlayerID      string     `json:"playerId"`
-	InitialAmount string     `json:"initialAmount"`
-	InitialObject *moneyWire `json:"initialBalance,omitempty"`
-	Currency      string
-	CorrelationID string
+	PlayerID       string     `json:"playerId"`
+	InitialAmount  string     `json:"initialAmount"`
+	InitialObject  *moneyWire `json:"initialBalance,omitempty"`
+	Currency       string
+	IdempotencyKey string
+	CorrelationID  string
 }
 
 type moneyWire struct {
@@ -62,12 +63,13 @@ type getProviderTransactionRequest struct {
 // --- responses -------------------------------------------------------------
 
 type walletResponse struct {
-	ID        string    `json:"id"`
-	PlayerID  string    `json:"playerId"`
-	Balance   moneyWire `json:"balance"`
-	Version   int64     `json:"version"`
-	CreatedAt time.Time `json:"createdAt"`
-	UpdatedAt time.Time `json:"updatedAt"`
+	ID               string    `json:"id"`
+	PlayerID         string    `json:"playerId"`
+	Balance          moneyWire `json:"balance"`
+	Version          int64     `json:"version"`
+	CreatedAt        time.Time `json:"createdAt"`
+	UpdatedAt        time.Time `json:"updatedAt"`
+	IdempotentReplay bool      `json:"idempotentReplay,omitempty"`
 }
 
 type submitResponse struct {
@@ -135,10 +137,11 @@ func openWalletEndpoint(ws *service.WalletService) endpoint.Endpoint {
 	return func(ctx context.Context, request interface{}) (interface{}, error) {
 		req := request.(openWalletRequest)
 		in := service.OpenWalletInput{
-			PlayerID:      req.PlayerID,
-			InitialAmount: req.InitialAmount,
-			Currency:      req.Currency,
-			CorrelationID: req.CorrelationID,
+			PlayerID:       req.PlayerID,
+			InitialAmount:  req.InitialAmount,
+			Currency:       req.Currency,
+			IdempotencyKey: req.IdempotencyKey,
+			CorrelationID:  req.CorrelationID,
 		}
 		view, err := ws.Open(ctx, in)
 		if err != nil {
@@ -148,6 +151,7 @@ func openWalletEndpoint(ws *service.WalletService) endpoint.Endpoint {
 			ID: view.ID.String(), PlayerID: view.PlayerID.String(),
 			Balance: moneyPayload(view.Balance), Version: view.Version,
 			CreatedAt: view.CreatedAt, UpdatedAt: view.UpdatedAt,
+			IdempotentReplay: view.IdempotentReplay,
 		}, nil
 	}
 }

@@ -40,10 +40,11 @@ type WagerResult struct {
 
 // OpenWalletInput is the internal wallet opening command.
 type OpenWalletInput struct {
-	PlayerID      string
-	InitialAmount string
-	Currency      string
-	CorrelationID string
+	PlayerID       string
+	InitialAmount  string
+	Currency       string
+	IdempotencyKey string
+	CorrelationID  string
 }
 
 // WalletView is the read model for wallets.
@@ -55,6 +56,10 @@ type WalletView struct {
 	Version   int64
 	CreatedAt time.Time
 	UpdatedAt time.Time
+	// IdempotentReplay is true when the opening was served from a previously
+	// committed request with the same Idempotency-Key (no new wallet, no new
+	// ledger row): the response reproduces the original one.
+	IdempotentReplay bool
 }
 
 // ReconciliationReport compares the stored balance with the ledger-derived
@@ -87,6 +92,20 @@ type WalletRepository interface {
 	// never block each other).
 	GetForUpdate(ctx context.Context, id uuid.UUID) (*domain.Wallet, error)
 	GetByPlayerAndCurrency(ctx context.Context, playerID uuid.UUID, currency string, forUpdate bool) (*domain.Wallet, error)
+}
+
+// WalletOpenRepository stores the durable idempotency identity of a wallet
+// opening, so POST /wallets replays the original result instead of creating a
+// second wallet (or failing with a conflict) when the same request is retried.
+type WalletOpenRepository interface {
+	// Record binds an idempotency key to the wallet it created, together
+	// with the hash of the request payload. It returns ErrDuplicateInsert
+	// when the key was already recorded.
+	Record(ctx context.Context, key, payloadHash string, walletID uuid.UUID) error
+	// Lookup returns the wallet created under key and the payload hash that
+	// was recorded with it. It returns ErrRepoNotFound when the key is
+	// unknown.
+	Lookup(ctx context.Context, key string) (walletID uuid.UUID, payloadHash string, err error)
 }
 
 // TransactionRepository persists wager transactions and their durable
@@ -152,6 +171,7 @@ type OutboxRepository interface {
 // Repos bundles the repositories bound to one executor (pool or tx).
 type Repos interface {
 	Wallets() WalletRepository
+	WalletOpens() WalletOpenRepository
 	Transactions() TransactionRepository
 	Ledger() LedgerRepository
 	Inbox() InboxRepository

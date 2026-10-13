@@ -34,7 +34,14 @@ type fakeStore struct {
 	txByExt  map[string]*domain.WagerTransaction // provider|externalTransactionId
 	ledger   []domain.LedgerEntry
 	outbox   []domain.Envelope
-	outcomes []string // recorded service.Instrumentation.WagerOutcome lines
+	opens    map[string]fakeOpen // idempotencyKey -> recorded opening
+	outcomes []string            // recorded service.Instrumentation.WagerOutcome lines
+}
+
+// fakeOpen is a recorded wallet-opening idempotency row.
+type fakeOpen struct {
+	hash     string
+	walletID uuid.UUID
 }
 
 func newFakeStore(t *testing.T, opening string) *fakeStore {
@@ -46,6 +53,7 @@ func newFakeStore(t *testing.T, opening string) *fakeStore {
 		txByID:  map[uuid.UUID]*domain.WagerTransaction{},
 		txByKey: map[string]*domain.WagerTransaction{},
 		txByExt: map[string]*domain.WagerTransaction{},
+		opens:   map[string]fakeOpen{},
 	}
 }
 
@@ -107,6 +115,7 @@ func (s *recordingSpan) End() {}
 type fakeRepos struct{ store *fakeStore }
 
 func (r *fakeRepos) Wallets() service.WalletRepository           { return fakeWallets{r.store} }
+func (r *fakeRepos) WalletOpens() service.WalletOpenRepository   { return fakeWalletOpens{r.store} }
 func (r *fakeRepos) Transactions() service.TransactionRepository { return fakeTxs{r.store} }
 func (r *fakeRepos) Ledger() service.LedgerRepository            { return fakeLedger{r.store} }
 func (r *fakeRepos) Inbox() service.InboxRepository              { return fakeInbox{} }
@@ -151,6 +160,29 @@ func (r fakeWallets) GetByPlayerAndCurrency(_ context.Context, playerID uuid.UUI
 		}
 	}
 	return nil, service.ErrRepoNotFound
+}
+
+// fakeWalletOpens records wallet-opening idempotency keys in memory.
+type fakeWalletOpens struct{ s *fakeStore }
+
+func (r fakeWalletOpens) Record(_ context.Context, key, payloadHash string, walletID uuid.UUID) error {
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	if _, exists := r.s.opens[key]; exists {
+		return service.ErrDuplicateInsert
+	}
+	r.s.opens[key] = fakeOpen{hash: payloadHash, walletID: walletID}
+	return nil
+}
+
+func (r fakeWalletOpens) Lookup(_ context.Context, key string) (uuid.UUID, string, error) {
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	o, ok := r.s.opens[key]
+	if !ok {
+		return uuid.Nil, "", service.ErrRepoNotFound
+	}
+	return o.walletID, o.hash, nil
 }
 
 type fakeTxs struct{ s *fakeStore }
