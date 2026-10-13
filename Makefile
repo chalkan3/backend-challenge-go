@@ -1,4 +1,4 @@
-.PHONY: build fmt vet test test-race test-integration e2e up up-multi up-split down logs migrate-up migrate-down migrate-status kind-check kind-up kind-image kind-deploy kind-split kind-down kind-argocd kind-argocd-seed kind-status helm-lint engine-check preflight
+.PHONY: build fmt vet test test-race test-integration e2e up up-multi up-split down logs migrate-up migrate-down migrate-status kind-check kind-up kind-image kind-deploy kind-split kind-down kind-argocd kind-argocd-seed kind-status helm-lint engine-check preflight load-smoke load load-hot load-idempotency load-mixed load-distributed load-soak load-verify
 
 # Engine/compose detection lives in scripts/engine.sh (podman vs docker). We ask
 # it once per recipe via $(shell ...) so `make up`, `make logs`, ... use exactly
@@ -135,3 +135,53 @@ helm-lint:
 	helm template wallet deploy/kubernetes/charts/wallet \
 		--set split.enabled=true --set observability.enabled=true --set observability.otel.enabled=true >/dev/null
 	@echo "chart renders in all topologies"
+
+# ===========================================================================
+# Testes de carga (k6)
+# ===========================================================================
+# O k6 roda a partir da imagem oficial — nada é instalado na máquina.
+#
+#   make load-smoke         contrato completo, 1 VU, poucos segundos
+#   make load               hot + idempotency + mixed (o conjunto padrão)
+#   make load-hot           UMA carteira, muitas VUs: prova o lock por linha
+#   make load-idempotency   replay, conflito de chave e controle de chave distinta
+#   make load-mixed         tráfego misto com linhas adversariais esperadas
+#   make load-distributed   APIS=... exigido: lock entre processos (make up-multi)
+#   make load-soak          DURATION=30m para um soak de verdade
+#   make load-verify        auditoria de integridade direto no Postgres
+#
+# O k6 mede a API; o load-verify prova o que foi COMMITADO. Os dois juntos são
+# a alegação — nenhum sozinho basta. Ver loadtest/README.md.
+
+# Overrides: VUS=128, ITER_PER_VU=10, DURATION=30m, APIS=... — pass as make args,
+# they are forwarded into the k6 container as k6 -e environment variables.
+api_load = ./scripts/load-run.sh
+
+load-smoke:
+	$(api_load) smoke
+
+load:
+	./scripts/load-run.sh all
+
+load-hot:
+	VUS=$(or $(VUS),48) ITER_PER_VU=$(or $(ITER_PER_VU),7) $(api_load) hot
+
+load-idempotency:
+	VUS=$(or $(VUS),24) ITER_PER_VU=$(or $(ITER_PER_VU),9) $(api_load) idempotency
+
+load-mixed:
+	VUS=$(or $(VUS),48) ITER_PER_VU=$(or $(ITER_PER_VU),10) $(api_load) mixed
+
+# make's $(or ...) splits on commas, so a multi-value default cannot live inside
+# it: override with `make load-distributed APIS=host:8081,host:8082`.
+APIS ?= http://localhost:8081,http://localhost:8082,http://localhost:8083
+
+load-distributed:
+	APIS="$(APIS)" VUS=$(or $(VUS),96) ITER_PER_VU=$(or $(ITER_PER_VU),6) \
+		./scripts/load-run.sh distributed
+
+load-soak:
+	VUS=$(or $(VUS),16) DURATION=$(or $(DURATION),2m) $(api_load) soak
+
+load-verify:
+	./scripts/load-verify.sh
