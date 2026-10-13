@@ -69,12 +69,78 @@ jobs:
       - name: Unit tests (with race detector)
         run: go test -race -count=1 ./...
 
-      - name: Coverage
-        # Reported, not gated: a coverage threshold on a challenge repo turns
-        # into gaming the number. The artifact is here so a reviewer can see it.
+      - name: Coverage (ratchet toward 90%)
+        # A two-sided gate, and the reasons matter:
+        #
+        #  • The TARGET is 90% of the unit suite, and it is a real goal, not
+        #    decoration. But the suite sits at ~74% today, so making 90%
+        #    blocking right now would just paint the build red and teach
+        #    everyone to ignore it.
+        #
+        #  • The FLOOR below is a ratchet: it only ever moves up. It fails the
+        #    build the moment coverage drops, which is the property that
+        #    actually matters — a number that can fall silently is worse than
+        #    no number. Raise TARGET to replace it once the suite reaches it.
+        #
+        # Why the number is honest and reachable: internal/postgres is tested
+        # against a fake of its own `querier` interface (the same seam the
+        # service uses), so the adapter's real logic — error translation, NULL
+        # handling, scans, SQL shape — is covered without a database. What a
+        # fake cannot prove (row locks, unique constraints, triggers) lives in
+        # the integration suite behind the `integration` tag; that is why this
+        # gate is on the unit suite only, and why the two together — not
+        # either alone — are the claim.
+        env:
+          # Target we are climbing toward. Enable the hard gate by setting
+          # this equal to FLOOR (or editing the comparison) once reached.
+          COVERAGE_TARGET: "90"
+          # Ratchet floor: the current measured value, rounded down. Never
+          # lower this without saying why in the commit message.
+          COVERAGE_FLOOR: "73"
         run: |
           go test -count=1 -covermode=atomic -coverprofile=coverage.out ./...
-          go tool cover -func=coverage.out | tail -1
+          total="$(go tool cover -func=coverage.out | tail -1 | awk '{print $NF}' | tr -d '%')"
+          echo "unit coverage: ${total}%   (target: ${COVERAGE_TARGET}% · floor: ${COVERAGE_FLOOR}%)"
+
+          # Integer-compare with awk to avoid a float comparison in bash.
+          below_floor="$(awk -v t="$total" -v f="$COVERAGE_FLOOR" 'BEGIN { print (t >= f) ? "0" : "1" }')"
+          if [ "$below_floor" = "1" ]; then
+            echo "::error::coverage ${total}% dropped below the ${COVERAGE_FLOOR}% ratchet floor"
+            # Name the packages dragging the total down, so the failure is
+            # actionable rather than just red.
+            python3 - <<'PY'
+          import collections
+          tot = collections.Counter()
+          hit = collections.Counter()
+          for line in open("coverage.out"):
+              if line.startswith("mode:"):
+                  continue
+              loc, stmts, count = line.rsplit(" ", 2)
+              f = loc.split(":")[0]
+              tot[f] += int(stmts)
+              if int(count) > 0:
+                  hit[f] += int(stmts)
+          rows = []
+          for f in tot:
+              missing = tot[f] - hit[f]
+              if missing:
+                  rows.append((100.0 * hit[f] / tot[f], missing, tot[f], f))
+          rows.sort()
+          print("lowest-covered files:")
+          for pct, missing, total_f, f in rows[:10]:
+              print(f"  {pct:5.1f}%  miss {missing:4d}/{total_f:4d}  {f}")
+          PY
+            exit 1
+          fi
+
+          # Progress toward the target, so the log shows the distance left.
+          remaining="$(awk -v t="$total" -v g="$COVERAGE_TARGET" 'BEGIN { print (t < g) ? "1" : "0" }')"
+          if [ "$remaining" = "1" ]; then
+            echo "::notice::${total}% is below the ${COVERAGE_TARGET}% target — this is expected while the ratchet climbs; the build is not failed for it."
+          fi
+
+      - name: Coverage summary
+        run: go tool cover -func=coverage.out | tail -1
 
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4

@@ -1,10 +1,15 @@
 name: Release
 
-# Publishes a multi-stage-enabled image to GHCR and cuts a GitHub Release.
+# Cuts a GitHub Release: cross-platform binaries (GoReleaser) and a multi-arch
+# container image (GHCR).
 #
 # Trigger: pushing a semver tag (v1.2.3) or running it manually. Nothing here
 # runs on `main` pushes — releases are deliberate acts, not side effects of a
 # merge.
+#
+# The two jobs are independent and run in parallel: a failure in one does not
+# silently ship half a release, because the release is only as good as its
+# weakest artifact. Both must be green for the run to be green.
 on:
   push:
     tags: ["v*.*.*"]
@@ -15,21 +20,67 @@ on:
         required: true
 
 permissions:
-  contents: write   # create the GitHub Release
+  contents: write   # create the GitHub Release and upload artifacts
   packages: write   # push to GHCR
 
 env:
   GO_VERSION: "1.26"
   REGISTRY: ghcr.io
+  # Pinned, not floating: a release built by a different GoReleaser than the
+  # one the config was validated against is a release whose config may not
+  # parse. Bump deliberately.
+  GORELEASER_VERSION: "v2.15.4"
 
 jobs:
-  # The image is built for two architectures. Building arm64 on an amd64
-  # runner uses QEMU, which is slow but honest: the same Dockerfile must
-  # produce the same binary on both, and a CGO_ENABLED=0 static build is what
-  # makes that possible.
-  publish:
-    name: publish image (amd64 + arm64)
+  # ── Binaries: the artifacts the image does not provide ─────────────────────
+  # An image is enough to *run* the service; it is not enough to run it on a
+  # laptop, in a scratch container without a registry, or on a machine that
+  # cannot pull from GHCR. Versioned tarballs close that gap — and each one
+  # reports its own tag, commit and build date via `walletd version`.
+  binaries:
+    name: binaries (goreleaser · linux/darwin · amd64/arm64)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # GoReleaser derives the changelog from history; a shallow clone
+          # would produce a release note with a single commit in it.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # The same gate the CI job enforces, restated at the release boundary:
+      # a tag must not be able to publish a binary the tests never saw pass.
+      - name: Unit tests (with race detector)
+        run: go test -race -count=1 ./...
+
+      - name: Validate the GoReleaser config before it does anything
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: ${{ env.GORELEASER_VERSION }}
+          args: check
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: ${{ env.GORELEASER_VERSION }}
+          args: release --clean
+        env:
+          # The token creates the Release and uploads the artifacts to it.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── Image: the runtime artifact, for both architectures ────────────────────
+  # Building arm64 on an amd64 runner uses QEMU, which is slow but honest: the
+  # same Dockerfile must produce the same binary on both, and a CGO_ENABLED=0
+  # static build is what makes that possible.
+  image:
+    name: image (amd64 + arm64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
 
@@ -69,6 +120,13 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            # The image's binary must know its version too — the same
+            # buildinfo fields the GoReleaser tarballs carry, so `docker run
+            # ... walletd version` and the tarball agree.
+            VERSION=${{ steps.tag.outputs.tag }}
+            COMMIT=${{ github.sha }}
+            DATE=${{ github.event.head_commit.timestamp }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -85,22 +143,3 @@ jobs:
           sbom: true
           provenance: true
           cache-from: type=gha
-
-      - name: GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.tag.outputs.tag }}
-          generate_release_notes: true
-          body: |
-            Container image:
-
-            ```
-            docker pull ${{ env.REGISTRY }}/${{ github.repository }}:${{ steps.tag.outputs.tag }}
-            ```
-
-            Run it in any of the three modes (see the README):
-
-            ```
-            docker run --rm -e WALLET_MODE=api      ${{ env.REGISTRY }}/${{ github.repository }}:${{ steps.tag.outputs.tag }}
-            docker run --rm -e WALLET_MODE=workers  ${{ env.REGISTRY }}/${{ github.repository }}:${{ steps.tag.outputs.tag }}
-            ```

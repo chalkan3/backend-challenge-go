@@ -17,9 +17,9 @@ transactional outbox, inbox durável e controle de concorrência por carteira.
 
 [![CI](https://github.com/chalkan3/backend-challenge-go/actions/workflows/ci.yml/badge.svg)](https://github.com/chalkan3/backend-challenge-go/actions/workflows/ci.yml)
 [![Release](https://github.com/chalkan3/backend-challenge-go/actions/workflows/release.yml/badge.svg)](https://github.com/chalkan3/backend-challenge-go/actions/workflows/release.yml)
-[![Testes unitários](https://img.shields.io/badge/unit%20tests-236%20passing-2ea043)](#-testes)
-[![Testes de integração](https://img.shields.io/badge/integration%20tests-124%20passing-2ea043)](#-testes)
-[![Cobertura](https://img.shields.io/badge/coverage-91%25-2ea043)](#-testes)
+[![Testes unitários](https://img.shields.io/badge/unit%20tests-427%20passing-2ea043)](#-testes)
+[![Testes de integração](https://img.shields.io/badge/integration%20tests-63%20passing-2ea043)](#-testes)
+[![Cobertura](https://img.shields.io/badge/coverage-73.7%25%20%E2%86%92%2090%25-yellow)](#-testes)
 [![Go Report Card](https://goreportcard.com/badge/github.com/chalkan3/backend-challenge-go)](https://goreportcard.com/report/github.com/chalkan3/backend-challenge-go)
 
 </div>
@@ -369,7 +369,7 @@ todos são atendidos por `WALLET_MODE` + `--scale`.
 docker compose --profile split up -d --scale workers=4
 ```
 
-**Prova de que funciona** (`make e2e SPLIT=1`, 25 testes, race detector):
+**Prova de que funciona** (`make e2e SPLIT=1`, com race detector):
 
 - `POST /wallets` no `api` (:8084) → **201**; no `workers` (:8085) → **404**;
 - `/health/live`, `/health/ready` e `/metrics` respondem nos **dois** modos;
@@ -699,7 +699,7 @@ A identidade da mensagem é `sha256` do corpo. Eventos de saída são publicados
 ### Unitários
 
 ```sh
-go test ./...            # 236 testes (testify), table-driven
+go test ./...            # 427 testes (testify), table-driven
 go test -race ./...      # com detector de corrida
 go vet ./...             # + go vet -tags=integration ./...
 gofmt -l .               # vazio = formatado
@@ -733,7 +733,8 @@ docker compose up -d postgres keycloak localstack app   # dependências + app
 make test-integration                                   # go test -tags=integration ./test/integration/...
 ```
 
-Cobrem **124 testes** distribuídos por `test/integration/`, `internal/postgres/`
+Cobrem **63 testes de topo** (mais os subtests table-driven) distribuídos por
+`test/integration/`, `internal/postgres/`
 e `internal/transport/http/`: migrations e constraints (ledger append-only,
 unicidades, CHECKs), atomicidade financeira, cenário obrigatório de concorrência
 (100.00 e duas apostas de 80.00, inclusive com **duas instâncias**), replays
@@ -821,8 +822,8 @@ não existe um caminho só-de-CI que possa divergir da documentação.
 
 | Job | O que roda | Por que existe |
 | :-- | :-- | :-- |
-| `quality` | `gofmt -l`, `go vet` (com e sem `-tags=integration`), `go test -race ./...`, coverage como artefato | Feedback rápido e hermético, sem containers. O `vet` com tag pega erro de compilação nos testes de integração **antes** do job caro |
-| `e2e` | `./scripts/e2e.sh` — compose real (Postgres + Keycloak + LocalStack) + suíte completa | É o job que **prova** as afirmações do desafio em vez de afirmá-las; 25 testes com race detector |
+| `quality` | `gofmt -l`, `go vet` (com e sem `-tags=integration`), `go test -race ./...`, cobertura com **ratchet** (falha se cair abaixo do piso; alvo 90%) | Feedback rápido e hermético, sem containers. O `vet` com tag pega erro de compilação nos testes de integração **antes** do job caro |
+| `e2e` | `./scripts/e2e.sh` — compose real (Postgres + Keycloak + LocalStack) + suíte completa | É o job que **prova** as afirmações do desafio em vez de afirmá-las; suíte de integração completa com race detector |
 | `e2e-split` | `SPLIT=1 ./scripts/e2e.sh` | Exercita `WALLET_MODE=api` + `WALLET_MODE=workers` como processos separados — se passar, o argumento de topologia do README está verificado a cada push |
 | `load` | `make load-smoke`, `make load-hot`, `make load-verify` | Sobe a stack, roda o contrato no k6 e depois audita o que foi **commitado** — fecha a lacuna entre "respondeu certo" e "está consistente" |
 | `image` | build da imagem, uid ≠ 0, `walletd version`, boot com `WALLET_MODE` inválido | Invariantes de segurança e de operação viram **falha de build**, não comentário de revisão |
@@ -840,15 +841,35 @@ O job `image` verifica três coisas que costumam ser só prometidas:
 > (`concurrency.cancel-in-progress`): resultado de um run superado não tem
 > valor, e minutos de CI são recurso.
 
-### `release.yml` — imagem e release
+### `release.yml` — binários e imagem
 
-Disparado por tag semver (`v1.2.3`) ou manualmente. Publica no GHCR uma imagem
-**multi-arquitetura** (`linux/amd64` + `linux/arm64`), com SBOM e provenance, e
-cria o GitHub Release com as instruções dos modos `api`/`workers`.
+Disparado por tag semver (`v1.2.3`) ou manualmente. Dois jobs independentes,
+em paralelo, porque as duas coisas que uma release precisa são diferentes:
+
+| Job | O que produz |
+| :-- | :-- |
+| `binaries` | **GoReleaser**: tarballs para `linux`/`darwin` × `amd64`/`arm64`, `checksums.txt` (SHA256), SBOM por arquivo e changelog agrupado por tipo de commit |
+| `image` | imagem multi-arquitetura (`linux/amd64` + `linux/arm64`) no GHCR, com SBOM e provenance |
+
+Ambos os jobs reescrevem o pacote `internal/platform/buildinfo` na hora do link,
+então o artefato **sabe sua própria versão** — o mesmo valor serve à telemetria
+(`service.version`) e a um socorro em produção:
 
 ```sh
-git tag v1.0.0 && git push origin v1.0.0
+git tag v1.0.0 && git push origin v1.0.0     # dispara a release
+
+walletd version
+# walletd v1.0.0 (a1b2c3d, 2025-01-01T00:00:00Z, go1.26.0 linux/amd64)
+
+sha256sum -c checksums.txt                    # integridade dos tarballs
+
+docker run --rm --entrypoint walletd \
+  ghcr.io/chalkan3/backend-challenge-go:v1.0.0 version   # a imagem concorda
 ```
+
+> [!NOTE]
+> O job `binaries` roda `go test -race ./...` **antes** de publicar: uma tag não
+> pode publicar um binário que os testes nunca viram passar.
 
 ### Rodando o que o CI roda, na sua máquina
 
@@ -858,6 +879,11 @@ go test -race -count=1 ./...
 make e2e          # job e2e
 make e2e SPLIT=1  # job e2e-split
 UP_ONLY=1 make e2e && make load-smoke && make load-hot && make load-verify  # job load
+
+# release, sem publicar: gera os tarballs e checa que o binário é versionado
+goreleaser check                       # valida .goreleaser.yml
+goreleaser release --snapshot --clean  # produz dist/ (binários + checksums)
+tar -xzf dist/walletd_*_linux_amd64.tar.gz -O walletd | sh -c 'cat >/tmp/wd && /tmp/wd version'
 ```
 
 ---
