@@ -73,14 +73,14 @@ jobs:
         # A two-sided gate, and the reasons matter:
         #
         #  • The TARGET is 90% of the unit suite, and it is a real goal, not
-        #    decoration. But the suite sits at ~74% today, so making 90%
-        #    blocking right now would just paint the build red and teach
-        #    everyone to ignore it.
+        #    decoration. The suite has now REACHED it (~90.0% measured), so the
+        #    floor is raised to match: 90% is blocking from here on.
         #
         #  • The FLOOR below is a ratchet: it only ever moves up. It fails the
         #    build the moment coverage drops, which is the property that
         #    actually matters — a number that can fall silently is worse than
-        #    no number. Raise TARGET to replace it once the suite reaches it.
+        #    no number. Raising the floor to the measured value is how the
+        #    target becomes binding instead of aspirational.
         #
         # Why the number is honest and reachable: internal/postgres is tested
         # against a fake of its own `querier` interface (the same seam the
@@ -91,12 +91,12 @@ jobs:
         # gate is on the unit suite only, and why the two together — not
         # either alone — are the claim.
         env:
-          # Target we are climbing toward. Enable the hard gate by setting
-          # this equal to FLOOR (or editing the comparison) once reached.
+          # The goal, now reached: the floor below equals it, so the gate is
+          # hard. Keep the two equal unless a deliberate exception is intended.
           COVERAGE_TARGET: "90"
           # Ratchet floor: the current measured value, rounded down. Never
           # lower this without saying why in the commit message.
-          COVERAGE_FLOOR: "73"
+          COVERAGE_FLOOR: "90"
         run: |
           go test -count=1 -covermode=atomic -coverprofile=coverage.out ./...
           total="$(go tool cover -func=coverage.out | tail -1 | awk '{print $NF}' | tr -d '%')"
@@ -252,11 +252,41 @@ jobs:
           echo "container uid: $uid"
           [ "$uid" != "0" ] || { echo "::error::image runs as root"; exit 1; }
 
-      - name: migrate subcommand is dependency-free
+      - name: version subcommand is dependency-free
         # `walletd version` must not need a DB or any config: it parses args
         # before building the Fx graph, which is what makes the binary usable
         # as an ops/health probe from a bare container.
         run: docker run --rm --entrypoint walletd wallet:ci version
+
+      - name: The version gets stamped into the binary
+        # The point of the -ldflags in the Dockerfile is that a shipped
+        # container can answer "what am I running?" without the tag it was
+        # pulled by. Nothing else in CI proves the flag actually reaches the
+        # right symbol — a typo in the package path or variable name would
+        # leave every image reporting `dev` and no test would notice, because
+        # the binary still runs perfectly. So build with a known version and
+        # assert on the output.
+        #
+        # The default (`dev`) is the other half of the claim: an unstamped
+        # build must admit it is unstamped rather than guess.
+        run: |
+          out="$(docker run --rm --entrypoint walletd wallet:ci version)"
+          echo "unstamped: $out"
+          grep -q 'walletd dev ' <<<"$out" \
+            || { echo "::error::the default build no longer reports 'dev': $out"; exit 1; }
+
+          docker build -q \
+            --build-arg VERSION=v9.9.9-ci \
+            --build-arg COMMIT=cafebabe \
+            --build-arg DATE=2026-01-01T00:00:00Z \
+            -t wallet:ci-stamped . >/dev/null
+          out="$(docker run --rm --entrypoint walletd wallet:ci-stamped version)"
+          echo "stamped:   $out"
+          grep -q 'v9\.9\.9-ci' <<<"$out" \
+            || { echo "::error::VERSION did not reach buildinfo.Version: $out"; exit 1; }
+          grep -q 'cafebabe' <<<"$out" \
+            || { echo "::error::COMMIT did not reach buildinfo.Commit: $out"; exit 1; }
+          echo "the tag, commit and date are baked in and readable"
 
       - name: The binary refuses to start with invalid configuration
         # Fail-fast is a feature: a bad WALLET_MODE must stop the process at

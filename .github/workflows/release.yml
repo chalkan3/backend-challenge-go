@@ -30,6 +30,11 @@ env:
   # one the config was validated against is a release whose config may not
   # parse. Bump deliberately.
   GORELEASER_VERSION: "v2.15.4"
+  # GoReleaser's sboms pipe shells out to syft, and the runner image does not
+  # ship it. Without this the binaries job fails at the very last step — after
+  # every artifact was built — with `exec: "syft": executable file not found`.
+  # Pinned for the same reason GoReleaser is.
+  SYFT_VERSION: "v1.54.1"
 
 jobs:
   # ── Binaries: the artifacts the image does not provide ─────────────────────
@@ -57,6 +62,12 @@ jobs:
       # a tag must not be able to publish a binary the tests never saw pass.
       - name: Unit tests (with race detector)
         run: go test -race -count=1 ./...
+
+      # Auto-installs on the first run and is a cache hit afterwards.
+      - name: Install syft (GoReleaser shells out to it for the SBOMs)
+        uses: anchore/sbom-action/download-syft@v0
+        with:
+          syft-version: ${{ env.SYFT_VERSION }}
 
       - name: Validate the GoReleaser config before it does anything
         uses: goreleaser/goreleaser-action@v6
@@ -88,8 +99,30 @@ jobs:
         id: tag
         run: |
           tag="${{ github.event.inputs.tag || github.ref_name }}"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "releasing $tag"
+          # A manual dispatch is the one trigger with no tag behind it, so it is
+          # the one that can be misspelled. Catching that here — before QEMU,
+          # buildx and a 40-minute multi-arch build — is the whole point of
+          # validating rather than trusting. `v*` keeps the manual path and the
+          # tag path agreeing on what a release is called.
+          case "$tag" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *)
+              echo "::error::tag '$tag' is not a semver tag (expected e.g. v1.0.0)"
+              exit 1
+              ;;
+          esac
+          # The build date the image bakes into `walletd version`. It cannot
+          # come from github.event.head_commit: that field is empty on a tag
+          # push and on workflow_dispatch, which would silently ship
+          # `DATE=` — an image reporting its version with a blank date. The
+          # commit is the reliable source; this is the same field GoReleaser
+          # uses for the tarballs' Date, so the two artifacts agree.
+          date="$(git show -s --format=%cI "${{ github.sha }}")"
+          {
+            echo "tag=$tag"
+            echo "date=$date"
+          } >> "$GITHUB_OUTPUT"
+          echo "releasing $tag (commit date $date)"
 
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
@@ -109,7 +142,12 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable={{is_default_branch}}
+            # This job only ever runs for tags (and manual dispatches), never
+            # for a branch push, so `is_default_branch` would evaluate false
+            # for the tag ref and `latest` would never be published. A tag IS
+            # the default-branch release here; `semver` explains the tag in
+            # tags that are not semver-ish, where this releases nothing.
+            type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
             type=raw,value=${{ steps.tag.outputs.tag }}
 
       - name: Build and push
@@ -126,7 +164,7 @@ jobs:
             # ... walletd version` and the tarball agree.
             VERSION=${{ steps.tag.outputs.tag }}
             COMMIT=${{ github.sha }}
-            DATE=${{ github.event.head_commit.timestamp }}
+            DATE=${{ steps.tag.outputs.date }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

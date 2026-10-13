@@ -8,9 +8,8 @@
 # guesswork.
 #
 # Validate a change locally without publishing:
-#   goreleaser release --snapshot --clean
-# Check the config parses:
-#   goreleaser check
+#   goreleaser check                          # config parses
+#   goreleaser release --snapshot --clean     # full dry run; needs syft on PATH
 version: 2
 
 project_name: walletd
@@ -45,12 +44,17 @@ builds:
 archives:
   - id: default
     formats: [tar.gz]
-    # Include only the binary and the license family of files: shipping the
-    # whole source tree in a binary archive bloats it and helps nobody.
+    # README.md and ARCHITECTURE.md are the two documents that actually exist
+    # in this repo and that a consumer of a *binary* needs: what the service
+    # guarantees, and how it is put together. The globs this replaced named
+    # LICENSE* and CHANGELOG* — files this repository has never had — so every
+    # archive matched nothing for them and shipped the README alone. Pointing
+    # at real files is the difference between a documented policy and a
+    # decorative one. (The repo is unlicensed and has no CHANGELOG: that is a
+    # fact about the repo, not something a glob should pretend to cover.)
     files:
-      - LICENSE*
       - README.md
-      - CHANGELOG*
+      - ARCHITECTURE.md
     format_overrides:
       - goos: darwin
         formats: [tar.gz]
@@ -107,8 +111,11 @@ release:
   github:
     owner: chalkan3
     name: backend-challenge-go
-  # Draft first: a human decides when it goes public, matching the release
-  # workflow's "releases are deliberate acts" stance.
+  # Published directly, not as a draft: the release workflow already gates a
+  # tag on `goreleaser check` and the full race-enabled unit suite, so a
+  # published release is one that passed. (This said "draft first" while the
+  # value was already `false` — the comment described an intention the config
+  # no longer had. Making it a draft again means flipping this and saying why.)
   draft: false
   prerelease: auto
   name_template: "{{ .ProjectName }} {{ .Tag }}"
@@ -121,9 +128,13 @@ release:
     docker pull ghcr.io/chalkan3/backend-challenge-go:{{ .Tag }}
     ```
 
-    Verification, from the source of the challenge:
+    ## Verify this release
 
-    ```
-    walletd version        # prints the tag, commit and build date baked in here
-    sha256sum -c checksums.txt
+    Each tarball contains `walletd` plus `README.md` and `ARCHITECTURE.md`. To
+    check the download and read the version the binary was linked with:
+
+    ```sh
+    sha256sum -c checksums.txt       # from the checksums.txt above
+    tar xzf walletd_{{ .Version }}_linux_amd64.tar.gz
+    ./walletd version                # prints {{ .Tag }}, the commit and the build date
     ```
