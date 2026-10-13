@@ -129,6 +129,17 @@ arquitetura), table-driven e sem I/O.
 - HTTP e SQS compartilham o MESMO caso de uso (`WagerService`), logo a
   deduplicação cruzada entre canais é automática. A inbox (abaixo) é uma
   segunda camada, específica da entrega at-least-once do SQS.
+- **Abertura de carteira (`POST /wallets`) segue o mesmo modelo.** Quando o
+  cabeçalho `Idempotency-Key` está presente, a chave é gravada em
+  `wallet_open_requests (idempotency_key PK, payload_hash, wallet_id)` **na
+  mesma transação** que a carteira, a transação `OPENING`, o lançamento no
+  ledger e os eventos de outbox. Repetir a requisição (mesmo hash do payload,
+  calculado com a mesma normalização de dinheiro) devolve a carteira original
+  com `idempotentReplay: true`, **sem** segunda carteira nem crédito duplicado;
+  reutilizar a chave com outro corpo devolve `409 IDEMPOTENCY_KEY_CONFLICT`.
+  Sem chave, a unicidade `(player_id, currency)` continua sendo a guarda
+  (`409 WALLET_ALREADY_EXISTS`) — a chave adiciona replay do **sucesso**, que
+  a unicidade sozinha não consegue oferecer.
 - Ao perder uma corrida de insert (violção de unicidade sob concorrência),
   o perdedor relê a linha vencedora e responde como replay — nunca erro.
 

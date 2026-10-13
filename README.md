@@ -34,6 +34,8 @@ transactional outbox, inbox durável e controle de concorrência por carteira.
 - [Estrutura do projeto](#-estrutura-do-projeto)
 - [Subindo o ambiente](#-subindo-o-ambiente)
   - [Um binário, três modos](#um-binário-três-modos-e-por-que-não-três-binários)
+  - [Kubernetes local (kind)](#kubernetes-local-kind--a-segunda-forma-de-subir-o-ambiente)
+  - [Caminho GitOps (opcional): ArgoCD](#caminho-gitops-opcional-argocd)
 - [Observabilidade](#-observabilidade)
 - [API](#-api)
 - [Testes](#-testes)
@@ -230,13 +232,23 @@ deploy/
 **Pré-requisitos:** Go 1.26+, e Docker (ou Podman) + Compose.
 
 ```sh
-docker compose up --build          # postgres + keycloak + localstack + app
+make up            # equivale a `docker compose up --build -d`
 ```
 
 > [!TIP]
 > O projeto foi validado com **Podman 5 + podman-compose**. Os comandos deste
-> README usam `docker compose` por ser o padrão do desafio; troque por
-> `podman-compose` (sem espaço) se for o seu caso — o `make e2e` detecta sozinho.
+> README usam `docker compose` por ser o padrão do desafio, mas **você não
+> precisa trocar nada à mão**: `make up`, `make down`, `make logs` e `make e2e`
+> detectam a implementação disponível (`podman-compose` ou `docker compose`) via
+> `scripts/engine.sh` — a mesma fonte de verdade para todos os entry points. Se
+> preferir invocar o compose direto, use a implementação do seu host.
+>
+> Os alvos `make up*` rodam antes um **pre-flight de portas**
+> (`scripts/port-check.sh`): se algo de fora do projeto já ocupa 8080/8081/4566
+> — tipicamente um cluster `kind`, que publica exatamente esses números — o
+> comando falha na hora com a causa, em vez de deixar os containers presos em
+> `Created`. Nesse caso rode `make kind-down` antes.
+
 
 ### Portas publicadas
 
@@ -338,6 +350,104 @@ make e2e SPLIT=1      # api + workers como processos separados
 make e2e MULTI=1      # três apps combinados (concorrência distribuída)
 ```
 
+### Kubernetes local (kind) — a segunda forma de subir o ambiente
+
+O compose é a forma mais curta de subir tudo. A segunda forma é **Kubernetes
+real**: um cluster `kind` de nó único, reconciliado por um **Helm chart**. Não é
+uma reescrita — é o **mesmo binário, os mesmos manifests de config**, expressos
+como Releases em vez de containers soltos.
+
+A razão de existir: o compose prova que os processos cooperam; o cluster prova
+que eles cooperam **quando o orquestrador decide onde e quando cada Pod nasce** —
+com `readinessProbe` no lugar de `depends_on`, `Service` DNS no lugar dos nomes
+de serviço do compose, e rollout/restart gerenciados. O wiring que o compose
+escreve à mão (`depends_on` + healthcheck) vira contrato declarativo.
+
+```sh
+make kind-check          # confere kind/helm/kubectl e mostra o engine detectado
+make kind-deploy         # cluster + imagem + chart, tudo em um passo
+```
+
+`make kind-deploy` encadeia quatro passos, cada um chamável sozinho:
+
+| Alvo | Script | O que faz |
+| :-- | :-- | :-- |
+| `make kind-check` | `scripts/kind-check.sh` | **Preflight**: verifica `kind`/`helm`/`kubectl` e escolhe o engine (`docker` ou `podman`). Falha **antes** de criar nada, com o que instalar — em vez de estourar no meio do deploy |
+| `make kind-up` | `scripts/kind-up.sh` | Cria o cluster (idempotente: reusa o existente; `RECREATE=1` força um limpo) |
+| `make kind-image` | `scripts/kind-image.sh` | Builda a imagem local e a carrega no node |
+| `make kind-deploy` | `scripts/kind-deploy.sh` | Instala/atualiza o release (`helm upgrade --install`) e espera os workloads |
+
+**A imagem entra pelo node, não por um registry.** `kind load docker-image`
+(o script usa `image-archive` quando o daemon está acessível mas `docker save`
+não) streama o tarball direto para o containerd do node — não há registry nesta
+máquina, e subir um só para alimentar um cluster de laptop seria uma peça móvel
+a mais sem benefício. A tag é o **SHA curto do git** (com sufixo `-dirty` para
+árvore suja), nunca `latest`: com `imagePullPolicy: IfNotPresent`, uma tag
+reusada faria código novo rodar a imagem velha silenciosamente.
+
+O chart já sabe alcançar suas dependências dentro do cluster (Service DNS — o
+mesmo wiring que o compose expressa com `depends_on` + nomes de serviço), então
+não há orquestração a fazer além de **ordem**: as dependências precisam existir
+antes de as migrations da app rodarem.
+
+#### Topologias e observabilidade
+
+O chart cobre as mesmas topologias do compose, por flags de values:
+
+```sh
+make kind-deploy                          # app único (all)
+make kind-split                           # api + workers (WALLET_MODE)
+make kind-deploy OBSERVABILITY=1 SPLIT=1  # split + collector/tempo/loki/prom/grafana
+```
+
+| Flag | Efeito |
+| :-- | :-- |
+| `SPLIT=1` | Dois Deployments: `api` (pool pgx inteiro para HTTP, owner do schema) e `workers` (pool menor, sem migrations) — as réplicas de cada lado escalam na própria dimensão |
+| `OBSERVABILITY=1` | Sobe o coletor OTLP, Tempo, Loki, Prometheus e Grafana como Pods do cluster |
+| `RECREATE=1` | Recria o cluster do zero (logo, banco limpo) em vez de reusar |
+| `VALUES=` / `SET=` | Arquivo de values extra / `--set` ad-hoc para o `helm` |
+
+Os endpoints saem no host pelas `extraPortMappings` do `deploy/kubernetes/kind/cluster.yaml`,
+**nos mesmos números do compose** — assim os exemplos de `curl` deste README
+funcionam sem alteração contra qualquer um dos dois ambientes:
+
+| Serviço | Host |
+| :-- | :-- |
+| API (`all`) | `http://localhost:8081` |
+| API `api` / workers (split) | `http://localhost:8084` / `:8085` |
+| Keycloak | `http://localhost:8080` |
+| LocalStack | `http://localhost:4566` |
+| Grafana / Prometheus (observabilidade) | `http://localhost:30300` / `:30909` |
+
+O `helm` renderiza as combinações sem tocar em cluster nenhum:
+
+```sh
+make helm-lint           # lint + template em todas as topologias
+make kind-status         # estado do release e dos workloads
+WALLET_TEST_API_URL=http://localhost:8081 make e2e   # a suíte e2e, contra o cluster
+make kind-down           # apaga o cluster inteiro (e os volumes)
+```
+
+#### Caminho GitOps (opcional): ArgoCD
+
+Além do `helm upgrade`, o repositório traz o caminho **GitOps** ponta a ponta:
+ArgoCD reconcilia o chart a partir de um **git in-cluster** (Gitea), dentro do
+próprio cluster.
+
+```sh
+make kind-argocd         # sobe cluster + chart, instala ArgoCD + Gitea e o Application
+make kind-argocd-seed    # re-semeia a pasta no git in-cluster (dispara um sync novo)
+```
+
+`scripts/kind-argocd-seed.sh` copia `deploy/kubernetes` para o Gitea e o
+`Application` aponta para ele; re-rodar depois de uma edição produz uma revisão
+nova para o ArgoCD sincronizar — o mesmo gesto de um `git push`, sem rede. A UI
+do ArgoCD fica em `http://localhost:8000`.
+
+> [!NOTE]
+> O `helm` é a fonte de verdade dos manifests; o ArgoCD é um **consumidor** desse
+> chart, não um caminho paralelo. Ambos instalam exatamente o mesmo release.
+
 ### Variáveis de ambiente
 
 Todas documentadas em [`.env.example`](.env.example). As principais:
@@ -414,7 +524,7 @@ provisionados com `allowUiUpdates: false`): *Wallet — Overview*,
 
 | Método | Rota | Quem pode | Descrição |
 | :-- | :-- | :-- | :-- |
-| `POST` | `/wallets` | `wallet-internal` | Abre carteira (`201 Created`) |
+| `POST` | `/wallets` | `wallet-internal` | Abre carteira (`201 Created`); aceita `Idempotency-Key` |
 | `GET` | `/wallets/{walletId}` | interno | Saldo e versão da carteira |
 | `GET` | `/wallets/{walletId}/ledger` | interno | Lançamentos paginados (`?limit=`) |
 | `POST` | `/wallets/{walletId}/reconciliation` | interno | Confere saldo × ledger |
@@ -427,8 +537,18 @@ provisionados com `allowUiUpdates: false`): *Wallet — Overview*,
 | Método | Rota | Descrição |
 | :-- | :-- | :-- |
 | `GET` | `/health/live` | Liveness (processo vivo) |
-| `GET` | `/health/ready` | Readiness (banco acessível) |
+| `GET` | `/health/ready` | Readiness (PostgreSQL **e** SQS acessíveis; `503` se algum cair) |
 | `GET` | `/metrics` | Métricas Prometheus |
+
+> [!NOTE]
+> **Idempotência em `POST /wallets`.** O cabeçalho `Idempotency-Key` é
+> opcional, mas quando presente torna a abertura 100% idempotente: a chave é
+> gravada na **mesma transação** da carteira (tabela `wallet_open_requests`),
+> de modo que repetir a mesma requisição devolve a carteira original com
+> `"idempotentReplay": true` — sem criar uma segunda carteira nem duplicar o
+> saldo de abertura. Reutilizar a chave com um corpo diferente devolve
+> `409 IDEMPOTENCY_KEY_CONFLICT`. Sem chave, a unicidade
+> `(playerId, currency)` continua sendo a guarda (`409 WALLET_ALREADY_EXISTS`).
 
 > [!NOTE]
 > Em `WALLET_MODE=workers` as rotas de **negócio** não são registradas: o
@@ -456,8 +576,9 @@ TOKEN_A=$(curl -s http://localhost:8080/realms/wallet/protocol/openid-connect/to
   -d grant_type=client_credentials -d client_id=provider-a -d client_secret=provider-a-secret | jq -r .access_token)
 API=http://localhost:8081
 
-# 1. abrir carteira (interna)
+# 1. abrir carteira (interna) — Idempotency-Key é opcional, mas recomendado
 curl -s -X POST $API/wallets -H "Authorization: Bearer $TOKEN_INT" -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: wallet-internal:open-player-42' \
   -d '{"playerId":"0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1","initialBalance":{"amount":"1000.00","currency":"BRL"}}'
 
 # 2. aposta (provider-a)
@@ -562,11 +683,14 @@ docker compose up -d postgres keycloak localstack app   # dependências + app
 make test-integration                                   # go test -tags=integration ./test/integration/...
 ```
 
-Cobrem **24 testes**: migrations e constraints (ledger append-only, unicidades,
+Cobrem **29 testes**: migrations e constraints (ledger append-only, unicidades,
 CHECKs), atomicidade financeira, cenário obrigatório de concorrência (100.00 e
 duas apostas de 80.00, inclusive com **duas instâncias**), replays HTTP+SQS
-cruzados, inbox/outbox, DLQ, resolução e expiração de referências (TTL),
-isolamento entre provedores, rejeição de credenciais e ciclo de vida Fx.
+cruzados, **idempotência de abertura de carteira** (`Idempotency-Key`), 
+inbox/outbox, DLQ, resolução e expiração de referências (TTL), isolamento entre
+provedores, rejeição de credenciais, ciclo de vida Fx e **recuperação de falha
+de infraestrutura** (fail-fast de Postgres/SQS no boot e degradação honesta de
+`/health/ready` a `503` quando uma dependência cai em runtime).
 
 ### Testes de jornada (histórias executáveis)
 
@@ -637,12 +761,16 @@ make e2e SPLIT=1  # job e2e-split
 | 💳 **Concorrência por carteira** | duas apostas de 80.00 numa carteira de 100.00 | exatamente uma passa; a outra `INSUFFICIENT_FUNDS`; saldo 20.00 |
 | ⚡ **Concorrência entre réplicas** | `docker compose --profile multi up`; uma aposta por instância | o lock row-level serializa sem sobrescrever |
 | 🔁 **Replay HTTP** | repetir a mesma `Idempotency-Key` | resposta idêntica, `idempotentReplay: true`, sem novo lançamento |
+| 🔑 **Replay de abertura** | repetir `POST /wallets` com a mesma `Idempotency-Key` | mesma carteira, `idempotentReplay: true`, saldo de abertura não duplica |
 | 📨 **Replay SQS** | reenviar a mesma mensagem | inbox deduplica; saldo não muda |
 | ☠️ **Consumidor morre pós-commit, pré-delete** | `docker compose kill app` durante carga | inbox absorve a reentrega; saldo não duplica |
 | 📤 **Publicador morre entre commit e publish** | `docker compose pause app` antes do worker publicar; depois `unpause` | outbox publica com o mesmo `eventId` |
 | 🥊 **Dois publishers na outbox** | duas instâncias com fila de eventos vazia | `FOR UPDATE SKIP LOCKED` + dedup por `eventId` |
 | ⏳ **Referência antes da transação** | enviar `REFUND` antes do `BET` | `PENDING_REFERENCE` → resolução automática (ou `REFERENCE_NOT_FOUND` após TTL) |
 | 🔄 **Reinício da aplicação** | `docker compose restart app` | idempotência e pendências sobrevivem (persistidas no Postgres) |
+| 🛑 **Postgres fora no boot** | apontar `WALLET_DB_DSN` para uma porta morta | a instância **falha rápido** (não sobe contra um banco inalcançável) |
+| 📵 **SQS fora no boot** | apontar `WALLET_SQS_ENDPOINT` para uma porta morta | a instância **falha rápido** ao resolver as filas |
+| 🩺 **Dependência cai em runtime** | derrubar o SQS com a app no ar | `/health/ready` vira `503`; `/health/live` segue `200` (processo vivo, sem tráfego) |
 
 ---
 
