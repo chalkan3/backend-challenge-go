@@ -313,7 +313,15 @@ com `WALLET_OTEL_ENABLED=true`.
 - O cenário 5 do §13 ("interromper o consumidor após o commit e antes do
   delete") tem harness automatizado — `test/integration/kill_after_commit_test.go`,
   determinístico via `commitGateTxManager` (sem depender de timing de
-  `docker kill`). O cenário 6 **não** tem teste dedicado; os demais cenários têm.
+  `docker kill`). O cenário 6 ("dois publishers disputando a mesma outbox e
+  recuperação de publicação") também tem teste dedicado —
+  `test/integration/outbox_publishers_race_test.go`, exercitando a porta
+  `ClaimBatch` concorrentemente (exclusão mútua do claim) e a recuperação após
+  expiração do lease. A metade de recuperação é **provada por mutação**
+  (remover o bump de `available_at` faz o teste falhar 3/3); a metade de
+  exclusão mútua é verificada, mas **não** distingue `SKIP LOCKED` de um
+  `FOR UPDATE` bloqueante — está documentado no próprio arquivo. Os demais
+  cenários têm cobertura.
 - Amostragem de traces é por razão fixa, sem tail sampling.
 - O mapeamento `providerId ↔ cliente Keycloak` usa mappers hardcoded no
   realm de teste; em produção, grupos/roles do IdP.
