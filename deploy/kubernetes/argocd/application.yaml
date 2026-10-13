@@ -1,0 +1,49 @@
+# ArgoCD Application — the GitOps entry point.
+#
+# This is the object that answers "what should be running?": ArgoCD reads it,
+# pulls chartPath in repoURL at targetRevision, renders it and reconciles the
+# cluster until it matches, reporting drift if someone edits a resource by hand.
+#
+# repoURL points at the in-cluster Gitea (not a local path) because ArgoCD only
+# sources from URLs — see the header of
+# deploy/kubernetes/charts/wallet/templates/argocd-gitea.yaml for the reasoning.
+#
+# Apply with: make kind-argocd
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: wallet
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: http://gitea.argocd.svc.cluster.local:3000/gitea/wallet-gitops.git
+    targetRevision: main
+    path: charts/wallet
+    helm:
+      # An additional values file shipped inside the seeded repo. Keeping the
+      # environment-specific overrides in the repo (rather than in the
+      # Application) is what makes a sync reproducible from the commit alone.
+      valueFiles:
+        - values-gitops.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: default
+  syncPolicy:
+    automated:
+      # prune: delete resources removed from git.
+      # selfHeal: revert manual `kubectl edit`, which is the property that
+      # makes a drift test meaningful.
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ApplyOutOfSyncOnly=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 1m

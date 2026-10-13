@@ -1,0 +1,349 @@
+{{/*
+Observability stack: Collector, Tempo, Loki, Prometheus, Grafana.
+Optional (`observability.enabled`), mirroring the compose "observability"
+profile — the core environment stays minimal unless asked for telemetry.
+
+The Collector is the single ingestion point; the app only ever knows
+OTLP/gRPC host:port, which is why swapping a backend is a values change.
+*/}}
+{{- if .Values.observability.enabled }}
+{{- $fullname := include "wallet.fullname" . }}
+{{/*
+Prometheus targets, resolved for whichever topology is installed. Compose
+hardcoded app/app-2/app-3 because service names are fixed there; a Helm release
+name is not, so the list is computed here and injected into the scraped config.
+*/}}
+{{- $targets := list -}}
+{{- if .Values.split -}}
+{{- $targets = append $targets (printf "%s-api:8080" $fullname) -}}
+{{- $targets = append $targets (printf "%s-workers:8080" $fullname) -}}
+{{- else -}}
+{{- $targets = append $targets (printf "%s:8080" $fullname) -}}
+{{- end -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullname }}-otel-config
+  labels:
+    {{- include "wallet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: observability
+data:
+  otel-collector.yaml: |
+{{ .Files.Get "files/observability/otel-collector.yaml" | indent 4 }}
+  tempo.yaml: |
+{{ .Files.Get "files/observability/tempo.yaml" | indent 4 }}
+  loki.yaml: |
+{{ .Files.Get "files/observability/loki.yaml" | indent 4 }}
+  prometheus.yml: |
+{{ tpl (printf "%s" (.Files.Get "files/observability/prometheus.yml"
+      | replace "RELEASE_SERVICE_TARGETS" (join "\n          - " $targets)
+      | replace "RELEASE_OTEL_TARGET" (printf "%s-otel-collector:8889" $fullname)
+      | replace "RELEASE_OTEL_INTERNAL_TARGET" (printf "%s-otel-collector:8888" $fullname))) . | indent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-otel-collector
+  labels:
+    {{- include "wallet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: observability
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "wallet.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: otel-collector
+  template:
+    metadata:
+      labels:
+        {{- include "wallet.labels" . | nindent 8 }}
+        app.kubernetes.io/component: otel-collector
+      annotations:
+        checksum/config: {{ .Files.Get "files/observability/otel-collector.yaml" | sha256sum }}
+    spec:
+      containers:
+        - name: otel-collector
+          image: otel/opentelemetry-collector-contrib:0.116.1
+          args: ["--config=/etc/otel/config.yaml"]
+          ports:
+            - { name: otlp-grpc, containerPort: 4317 }
+            - { name: otlp-http, containerPort: 4318 }
+            - { name: spanmetrics, containerPort: 8889 }
+            - { name: internal, containerPort: 8888 }
+          volumeMounts:
+            - { name: config, mountPath: /etc/otel }
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits:   { cpu: "1", memory: 512Mi }
+      volumes:
+        - name: config
+          configMap:
+            name: {{ $fullname }}-otel-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-otel-collector
+  labels:
+    {{- include "wallet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: otel-collector
+spec:
+  ports:
+    - { name: otlp-grpc, port: 4317, targetPort: otlp-grpc }
+    - { name: otlp-http, port: 4318, targetPort: otlp-http }
+    - { name: spanmetrics, port: 8889, targetPort: spanmetrics }
+    - { name: internal, port: 8888, targetPort: internal }
+  selector:
+    {{- include "wallet.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: otel-collector
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-tempo
+  labels:
+    {{- include "wallet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tempo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "wallet.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: tempo
+  template:
+    metadata:
+      labels:
+        {{- include "wallet.labels" . | nindent 8 }}
+        app.kubernetes.io/component: tempo
+    spec:
+      containers:
+        - name: tempo
+          image: grafana/tempo:2.6.1
+          args: ["-config.file=/etc/tempo/tempo.yaml"]
+          ports:
+            - { name: http, containerPort: 3200 }
+            - { name: otlp-grpc, containerPort: 4317 }
+          volumeMounts:
+            - { name: config, mountPath: /etc/tempo }
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits:   { cpu: "1", memory: 512Mi }
+      volumes:
+        - name: config
+          configMap:
+            name: {{ $fullname }}-otel-config
+            items:
+              - { key: tempo.yaml, path: tempo.yaml }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-tempo
+  labels:
+    {{- include "wallet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tempo
+spec:
+  ports:
+    - { name: http, port: 3200, targetPort: http }
+  selector:
+    {{- include "wallet.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: tempo
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-loki
+  labels:
+    {{- include "wallet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: loki
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "wallet.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: loki
+  template:
+    metadata:
+      labels:
+        {{- include "wallet.labels" . | nindent 8 }}
+        app.kubernetes.io/component: loki
+    spec:
+      containers:
+        - name: loki
+          image: grafana/loki:3.3.2
+          args: ["-config.file=/etc/loki/loki.yaml"]
+          ports:
+            - { name: http, containerPort: 3100 }
+          volumeMounts:
+            - { name: config, mountPath: /etc/loki }
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits:   { cpu: "1", memory: 512Mi }
+      volumes:
+        - name: config
+          configMap:
+            name: {{ $fullname }}-otel-config
+            items:
+              - { key: loki.yaml, path: loki.yaml }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-loki
+  labels:
+    {{- include "wallet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: loki
+spec:
+  ports:
+    - { name: http, port: 3100, targetPort: http }
+  selector:
+    {{- include "wallet.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: loki
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-prometheus
+  labels:
+    {{- include "wallet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: prometheus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "wallet.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: prometheus
+  template:
+    metadata:
+      labels:
+        {{- include "wallet.labels" . | nindent 8 }}
+        app.kubernetes.io/component: prometheus
+      annotations:
+        checksum/config: {{ .Files.Get "files/observability/prometheus.yml" | sha256sum }}
+    spec:
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v3.1.0
+          args:
+            - "--config.file=/etc/prometheus/prometheus.yml"
+            - "--storage.tsdb.retention.time=6h"
+            - "--web.enable-lifecycle"
+          ports:
+            - { name: http, containerPort: 9090 }
+          volumeMounts:
+            - { name: config, mountPath: /etc/prometheus }
+          readinessProbe:
+            httpGet: { path: /-/ready, port: http }
+            initialDelaySeconds: 5
+          resources:
+            requests: { cpu: 50m, memory: 256Mi }
+            limits:   { cpu: "1", memory: 1Gi }
+      volumes:
+        - name: config
+          configMap:
+            name: {{ $fullname }}-otel-config
+            items:
+              - { key: prometheus.yml, path: prometheus.yml }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-prometheus
+  labels:
+    {{- include "wallet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: prometheus
+spec:
+  ports:
+    - { name: http, port: 9090, targetPort: http }
+  selector:
+    {{- include "wallet.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: prometheus
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullname }}-grafana-provisioning
+  labels:
+    {{- include "wallet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: grafana
+data:
+  datasources.yaml: |
+{{ .Files.Get "files/observability/grafana/provisioning/datasources/datasources.yaml" | indent 4 }}
+  dashboards.yaml: |
+{{ .Files.Get "files/observability/grafana/provisioning/dashboards/dashboards.yaml" | indent 4 }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullname }}-grafana-dashboards
+  labels:
+    {{- include "wallet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: grafana
+data:
+  wallet-overview.json: |
+{{ .Files.Get "files/observability/grafana/dashboards/wallet-overview.json" | indent 4 }}
+  wallet-integrity.json: |
+{{ .Files.Get "files/observability/grafana/dashboards/wallet-integrity.json" | indent 4 }}
+  wallet-traces.json: |
+{{ .Files.Get "files/observability/grafana/dashboards/wallet-traces.json" | indent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-grafana
+  labels:
+    {{- include "wallet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: grafana
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "wallet.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: grafana
+  template:
+    metadata:
+      labels:
+        {{- include "wallet.labels" . | nindent 8 }}
+        app.kubernetes.io/component: grafana
+    spec:
+      containers:
+        - name: grafana
+          image: grafana/grafana:11.5.1
+          ports:
+            - { name: http, containerPort: 3000 }
+          env:
+            - { name: GF_AUTH_ANONYMOUS_ENABLED, value: "true" }
+            - { name: GF_AUTH_ANONYMOUS_ORG_ROLE, value: Admin }
+            - { name: GF_AUTH_DISABLE_LOGIN_FORM, value: "true" }
+            - { name: GF_FEATURE_TOGGLES_ENABLE, value: "traceqlEditor,nodeGraph" }
+          volumeMounts:
+            - { name: provisioning, mountPath: /etc/grafana/provisioning }
+            - { name: dashboards, mountPath: /etc/grafana/dashboards }
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits:   { cpu: "1", memory: 512Mi }
+      volumes:
+        - name: provisioning
+          configMap:
+            name: {{ $fullname }}-grafana-provisioning
+            items:
+              - { key: datasources.yaml, path: datasources/datasources.yaml }
+              - { key: dashboards.yaml, path: dashboards/dashboards.yaml }
+        - name: dashboards
+          configMap:
+            name: {{ $fullname }}-grafana-dashboards
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-grafana
+  labels:
+    {{- include "wallet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: grafana
+spec:
+  ports:
+    - { name: http, port: 3000, targetPort: http }
+  selector:
+    {{- include "wallet.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: grafana
+{{- end }}

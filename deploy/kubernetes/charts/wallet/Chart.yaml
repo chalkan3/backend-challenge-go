@@ -1,0 +1,19 @@
+apiVersion: v2
+name: wallet
+description: |
+  Wallet service for game providers — API, SQS consumer and outbox relay, with
+  PostgreSQL, Keycloak (OIDC) and LocalStack (SQS) as dependencies, plus an
+  optional observability stack (OTel Collector, Tempo, Loki, Prometheus, Grafana).
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - wallet
+  - fintech
+  - go-kit
+  - fx
+home: https://github.com/chalkan3/backend-challenge-go
+sources:
+  - https://github.com/chalkan3/backend-challenge-go
+maintainers:
+  - name: chalkan3

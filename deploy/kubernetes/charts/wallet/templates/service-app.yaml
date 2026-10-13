@@ -1,0 +1,29 @@
+{{- if not .Values.split.enabled }}
+{{/*
+Service do modo combinado: o alvo dos clientes HTTP.
+
+NodePort existe para casar com os extraPortMappings do kind-config.yaml (30080
+-> 8081 no host). Com exposeNodePorts=false o Service fica ClusterIP e o acesso
+passa a ser só `kubectl port-forward`.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "wallet.fullname" . }}
+  labels:
+    {{- include "wallet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: app
+spec:
+  type: {{ ternary "NodePort" "ClusterIP" .Values.service.exposeNodePorts }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+      {{- if .Values.service.exposeNodePorts }}
+      nodePort: {{ .Values.nodePorts.wallet }}
+      {{- end }}
+  selector:
+    {{- include "wallet.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: app
+{{- end }}

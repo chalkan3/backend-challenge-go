@@ -1,0 +1,28 @@
+{{- if .Values.ingress.enabled }}
+{{/*
+Ingress. Reachable in kind because the cluster is created with
+extraPortMappings on 80/443 (see deploy/kubernetes/kind/cluster.yaml) and an
+ingress controller is installed by `make kind-ingress`.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "wallet.fullname" . }}
+  labels:
+    {{- include "wallet.labels" . | nindent 4 }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "wallet.fullname" . }}{{ if .Values.split }}-api{{ end }}
+                port:
+                  number: {{ .Values.service.port }}
+{{- end }}

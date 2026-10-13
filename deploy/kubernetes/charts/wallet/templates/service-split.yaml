@@ -1,0 +1,51 @@
+{{- if .Values.split.enabled }}
+{{/*
+Services da topologia split — um por papel.
+
+`wallet-api`  : alvo dos clientes HTTP (NodePort 30081 -> 8084 no host).
+`wallet-workers`: existe só para tornar acessível o HTTP que o modo workers
+                  AINDA serve (/health/* e /metrics); as rotas de negócio não
+                  estão montadas nele. É o equivalente da porta 8085 no compose.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "wallet.fullname" . }}-api
+  labels:
+    {{- include "wallet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  type: {{ ternary "NodePort" "ClusterIP" .Values.service.exposeNodePorts }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+      {{- if .Values.service.exposeNodePorts }}
+      nodePort: {{ .Values.nodePorts.walletApi }}
+      {{- end }}
+  selector:
+    {{- include "wallet.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "wallet.fullname" . }}-workers
+  labels:
+    {{- include "wallet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: workers
+spec:
+  type: {{ ternary "NodePort" "ClusterIP" .Values.service.exposeNodePorts }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+      {{- if .Values.service.exposeNodePorts }}
+      nodePort: {{ .Values.nodePorts.walletWorkers }}
+      {{- end }}
+  selector:
+    {{- include "wallet.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: workers
+{{- end }}

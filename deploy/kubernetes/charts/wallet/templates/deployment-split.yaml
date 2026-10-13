@@ -1,0 +1,177 @@
+{{- if .Values.split.enabled }}
+{{/*
+Split topology: dois Deployments da MESMA imagem, diferenciados por WALLET_MODE.
+
+O que muda entre eles é só o papel: o pool pgx (dbMaxConns) e o gate dos
+workers. O processo `api` reserva o pool inteiro para HTTP, então um backlog na
+fila não consegue estrangular requisições — que é o motivo de a topologia
+existir (dividir em dois binários não aumenta throughput, porque o paralelismo
+do consumer é por processo).
+
+`workers` é o único que NÃO aplica migrations: o schema é responsabilidade do
+lado api, e N réplicas não devem competir na tabela do goose no startup.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "wallet.fullname" . }}-api
+  labels:
+    {{- include "wallet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  replicas: {{ .Values.split.api.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "wallet.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        {{- include "wallet.labels" . | nindent 8 }}
+        app.kubernetes.io/component: api
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "wallet.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      containers:
+        - name: wallet
+          image: {{ include "wallet.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: {{ include "wallet.fullname" . }}
+          env:
+            {{- include "wallet.commonEnv" (dict
+                  "root" .
+                  "mode" "api"
+                  "dbMaxConns" .Values.split.api.dbMaxConns
+                  "migrateOnStart" .Values.split.api.migrateOnStart
+                  "workersEnabled" false
+                  "serviceName" "wallet-api"
+                  "environment" "kind") | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.probes.liveness.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.probes.readiness.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.split.api.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "wallet.fullname" . }}-workers
+  labels:
+    {{- include "wallet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: workers
+spec:
+  replicas: {{ .Values.split.workers.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "wallet.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: workers
+  template:
+    metadata:
+      labels:
+        {{- include "wallet.labels" . | nindent 8 }}
+        app.kubernetes.io/component: workers
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "wallet.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      containers:
+        - name: wallet
+          image: {{ include "wallet.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: {{ include "wallet.fullname" . }}
+          env:
+            {{- include "wallet.commonEnv" (dict
+                  "root" .
+                  "mode" "workers"
+                  "dbMaxConns" .Values.split.workers.dbMaxConns
+                  "migrateOnStart" .Values.split.workers.migrateOnStart
+                  "workersEnabled" true
+                  "serviceName" "wallet-workers"
+                  "environment" "kind") | nindent 12 }}
+          # Só /health/* e /metrics existem no modo workers.
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.probes.liveness.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.probes.readiness.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.split.workers.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

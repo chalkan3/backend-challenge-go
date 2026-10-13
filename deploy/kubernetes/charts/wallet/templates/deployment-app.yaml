@@ -1,0 +1,140 @@
+{{/*
+Combined-role Deployment (WALLET_MODE=all). Rendered only when split=false.
+One process, one pool, HTTP + every background worker — the same topology
+`docker compose up` produces.
+*/}}
+{{- if not .Values.split.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "wallet.fullname" . }}
+  labels:
+    {{- include "wallet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: app
+spec:
+  replicas: {{ .Values.app.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "wallet.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: app
+  strategy:
+    # Migrations run at startup, so never let two pods race on the goose table.
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        {{- include "wallet.labels" . | nindent 8 }}
+        app.kubernetes.io/component: app
+      annotations:
+        # Roll the pods when configuration changes, not only when the image does.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "wallet.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      {{- if .Values.waitForDependencies.enabled }}
+      # Compose expressed this as `depends_on: condition: service_healthy`, and
+      # that guarantee does not exist in Kubernetes: a container starts as soon
+      # as it is scheduled, whatever the state of its dependencies. Without this
+      # gate the app booted, pgx failed to dial the Postgres Service before it
+      # had begun accepting connections, and Fx aborted the process — the pod
+      # CrashLoopBackOff'd until the database happened to win the race.
+      #
+      # `kubectl` has no "wait for another workload" primitive, so the wait is an
+      # initContainer polling each dependency directly. It is deliberately a
+      # different image from the app: a connection check needs a client, not the
+      # application, and reusing postgres:17-alpine means no extra pull (the
+      # chart already deploys it).
+      initContainers:
+        - name: wait-for-dependencies
+          image: {{ .Values.waitForDependencies.image }}
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              deadline=$(( $(date +%s) + {{ .Values.waitForDependencies.timeoutSeconds }} ))
+              wait_for() {
+                name="$1"; shift
+                until "$@" >/dev/null 2>&1; do
+                  if [ "$(date +%s)" -ge "$deadline" ]; then
+                    echo "wait-for-dependencies: timed out waiting for $name" >&2
+                    exit 1
+                  fi
+                  echo "wait-for-dependencies: waiting for $name"
+                  sleep 2
+                done
+                echo "wait-for-dependencies: $name is ready"
+              }
+              {{- if .Values.postgresql.enabled }}
+              wait_for postgres pg_isready -h {{ include "wallet.postgresHost" . }} -p 5432 -U {{ .Values.postgresql.auth.username }} -d {{ .Values.postgresql.auth.database }}
+              {{- end }}
+              {{- if and .Values.sqs.localstack.enabled (not .Values.sqs.external.endpoint) }}
+              wait_for localstack wget -q -O- http://{{ include "wallet.localstackHost" . }}:4566/_localstack/health
+              {{- end }}
+              {{- if .Values.keycloak.enabled }}
+              wait_for keycloak wget -q -O- http://{{ include "wallet.keycloakHost" . }}:8080/realms/{{ .Values.keycloak.realm }}/.well-known/openid-configuration
+              {{- end }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+      {{- end }}
+      containers:
+        - name: wallet
+          image: {{ include "wallet.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: {{ include "wallet.fullname" . }}
+          env:
+            {{- include "wallet.commonEnv" (dict
+                  "root" .
+                  "mode" "all"
+                  "dbMaxConns" .Values.app.dbMaxConns
+                  "migrateOnStart" .Values.config.migrateOnStart
+                  "workersEnabled" true
+                  "serviceName" "wallet"
+                  "environment" "kind") | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.probes.liveness.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.probes.readiness.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.app.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

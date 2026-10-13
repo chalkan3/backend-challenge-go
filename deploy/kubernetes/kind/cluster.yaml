@@ -1,0 +1,36 @@
+# kind cluster for the wallet stack.
+#
+# The port mappings mirror the host ports the docker-compose file publishes, so
+# every documented curl example keeps working unchanged after `make kind-up`:
+#
+#   8081 -> app (all/split api)     8080 -> Keycloak
+#   8082 -> app-2 (replica 2)       4566 -> LocalStack
+#   8083 -> app-3 (replica 3)
+#   8084 -> api   (split)           3000 -> Grafana
+#   8085 -> workers (split)         9090 -> Prometheus
+#
+# kind binds those host ports on the node container, so nothing else on the host
+# may already own them (that is what `make kind-check` verifies).
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: wallet
+nodes:
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    extraPortMappings:
+      - { containerPort: 30080, hostPort: 8080, protocol: TCP } # keycloak
+      - { containerPort: 30081, hostPort: 8081, protocol: TCP } # app
+      - { containerPort: 30082, hostPort: 8082, protocol: TCP } # app-2
+      - { containerPort: 30083, hostPort: 8083, protocol: TCP } # app-3
+      - { containerPort: 30084, hostPort: 8084, protocol: TCP } # api (split)
+      - { containerPort: 30085, hostPort: 8085, protocol: TCP } # workers (split)
+      - { containerPort: 30456, hostPort: 4566, protocol: TCP } # localstack
+      - { containerPort: 30030, hostPort: 3000, protocol: TCP } # grafana
+      - { containerPort: 30090, hostPort: 9090, protocol: TCP } # prometheus
+      - { containerPort: 30000, hostPort: 8000, protocol: TCP } # argocd UI
+    extraMounts: []

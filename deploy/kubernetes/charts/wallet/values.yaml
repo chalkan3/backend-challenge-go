@@ -1,0 +1,267 @@
+# Default values — the local (kind) profile.
+#
+# Design rule: every knob has a default that leaves the cluster in the same
+# shape `docker compose up` produces — same topology, same credentials, same
+# host ports — so the curl examples in the README work unchanged against either
+# environment. Anything environment-specific (the image tag, NodePort exposure)
+# is overridden by scripts/kind-deploy.sh, never edited here.
+#
+# This file is also the rendering contract: templates/ reads exactly these keys,
+# and `make helm-lint` proves all four topology/observability combinations still
+# render after a change.
+
+# -- Override the chart name. Standard Helm escape hatches; the defaults derive
+#    resource names from the release name, so two releases can coexist.
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  # -- Repository only; the tag is supplied per deploy.
+  repository: wallet
+  # -- Immutable tag, set by scripts/kind-image.sh to the short git SHA (with a
+  #    `-dirty` suffix for an uncommitted tree). Never "latest": with the
+  #    pullPolicy below, reusing a tag means changed code silently keeps running
+  #    the previously loaded image.
+  tag: ""
+  # -- IfNotPresent because the image is loaded straight into the node by
+  #    `kind load docker-image` and does not exist in any registry.
+  pullPolicy: IfNotPresent
+
+# -- Pull secrets, for the case where repository points at a private registry.
+imagePullSecrets: []
+
+# -- Use the combined ("all") topology or the split api+workers one.
+split:
+  # -- false = one Deployment running WALLET_MODE=all, as `docker compose up`.
+  enabled: false
+  api:
+    # -- Replica count for the HTTP-only process.
+    replicaCount: 1
+    # -- pgx pool reserved entirely for request handling; a queue backlog
+    #    cannot consume connections needed by HTTP, which is the reason the
+    #    split topology exists.
+    dbMaxConns: 15
+    # -- The api owns the schema in split mode.
+    migrateOnStart: true
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: "1"
+        memory: 256Mi
+  workers:
+    # -- Scale this independently of the api: --set split.workers.replicaCount=3
+    replicaCount: 1
+    # -- Smaller pool: the consumer's parallelism is already bounded by
+    #    WALLET_CONSUMER_CONCURRENCY (per process), so extra connections only
+    #    add pressure.
+    dbMaxConns: 5
+    # -- Workers must never race the api on the goose version table.
+    migrateOnStart: false
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: "1"
+        memory: 256Mi
+
+app:
+  # -- Replica count in combined mode. Ignored when split.enabled=true.
+  replicaCount: 1
+  # -- Pool size for the combined process, which shares it between HTTP and the
+  #    background workers.
+  dbMaxConns: 10
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: "1"
+      memory: 256Mi
+  # -- Extra environment variables merged into every role's env block. An escape
+  #    hatch for experiments (e.g. tracing) without chart changes.
+  extraEnv: {}
+
+config:
+  # -- Log level for slog (debug|info|warn|error).
+  logLevel: info
+  # -- Run goose migrations at startup. The api (or the combined process) owns
+  #    this; workers always get false, set in split.workers.migrateOnStart.
+  migrateOnStart: true
+  # -- Kept for parity with the compose wiring; the ConfigMap carries the same
+  #    value and is the one actually injected via envFrom.
+  httpAddr: ":8080"
+  env: local
+
+# -- Host ports published through the kind cluster's extraPortMappings. These
+#    are the numbers to change if you run two clusters at once; they must match
+#    kind/cluster.yaml, which is where the mapping to the node container lives.
+nodePorts:
+  wallet: 30081
+  walletApi: 30084
+  walletWorkers: 30085
+  keycloak: 30080
+  localstack: 30456
+
+service:
+  # -- Port the app listens on inside the pod (WALLET_HTTP_ADDR).
+  port: 8080
+  # -- true = NodePort, reachable at http://localhost:8081 on the host, which is
+  #    what makes the compose curls work. false = ClusterIP, then use
+  #    `kubectl port-forward`.
+  exposeNodePorts: true
+
+probes:
+  liveness:
+    path: /health/live
+    initialDelaySeconds: 10
+  readiness:
+    path: /health/ready
+    initialDelaySeconds: 5
+
+# -- Startup gate. Compose's `depends_on: service_healthy` has no Kubernetes
+#    equivalent: without this, the app starts alongside its dependencies and
+#    crashes when the first connection is refused.
+waitForDependencies:
+  # -- Set false when the dependencies are known to be up already (or are
+  #    external), to shave the polling off a redeploy.
+  enabled: true
+  # -- Client image for the TCP/HTTP checks. postgres:17-alpine is already
+  #    pulled by this chart and ships both `pg_isready` and `wget` (busybox).
+  image: postgres:17-alpine
+  # -- Give up after this long and fail loudly, rather than hanging forever.
+  timeoutSeconds: 180
+
+# -- Optional ingress. Needs an ingress controller in the cluster
+#    (`make kind-ingress`); off by default because NodePort alone covers the
+#    local use case.
+ingress:
+  enabled: false
+  className: nginx
+  host: wallet.localhost
+
+serviceAccount:
+  # -- false is the honest default: the app talks to no Kubernetes API and so
+  #    needs no identity at all.
+  create: false
+  name: ""
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# ---------------------------------------------------------------------------
+# Dependencies. Each can be turned off independently and pointed at an external
+# service instead — the same chart therefore describes a laptop environment and
+# a real one, the difference being which of these blocks is enabled.
+# ---------------------------------------------------------------------------
+postgresql:
+  # -- Deploy PostgreSQL in-cluster (StatefulSet + PVC).
+  enabled: true
+  # -- Same tag as docker-compose.yml, so the schema behaves identically.
+  image: postgres:17-alpine
+  auth:
+    username: wallet
+    password: wallet
+    database: wallet
+  persistence:
+    # -- Volume size for the pgdata PVC.
+    size: 1Gi
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "2"
+      memory: 1Gi
+
+keycloak:
+  # -- Deploy Keycloak and import the `wallet` realm from files/keycloak.
+  enabled: true
+  image:
+    repository: quay.io/keycloak/keycloak
+    tag: "26.3"
+    pullPolicy: IfNotPresent
+  # -- Realm imported at boot; its clients and secrets live in the realm JSON.
+  realm: wallet
+  admin:
+    # -- Bootstrap admin, matching compose (admin/admin).
+    username: admin
+    password: admin
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    # 1Gi is not enough for this image, and the failure mode is deceptive: the
+    # container is OOMKilled during Keycloak's first-boot augmentation, which
+    # happens before the server ever logs a line, so the pod looks like a crash
+    # loop with an empty log. The augmentation step is the memory peak (it
+    # builds and optimises the provider classpath), not steady state, which is
+    # why a local 1Gi limit that "should be fine" is not.
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
+sqs:
+  localstack:
+    # -- Deploy LocalStack and provision the FIFO queues via files/localstack.
+    enabled: true
+    image: localstack/localstack:4
+  # -- External SQS (or LocalStack elsewhere) — used when localstack.enabled is
+  #    false. The region and queue names are always taken from here, because
+  #    they are consumed by the ConfigMap regardless of where the broker runs.
+  external:
+    # -- Endpoint of an external SQS. Empty means "in-cluster LocalStack".
+    endpoint: ""
+    region: us-east-1
+    accessKeyId: test
+    secretKey: test
+    requestQueue: wager-transactions.fifo
+    eventsQueue: integration-events.fifo
+    dlqQueue: wager-transactions-dlq.fifo
+
+aws:
+  # -- Region used by the SQS client; mirrors sqs.external.region for the
+  #    values consumed directly by the app env block.
+  region: us-east-1
+  accessKeyId: test
+  secretKey: test
+
+auth:
+  # -- Public issuer URL. It must be the host-facing one because it is what the
+  #    token carries in `iss` — tokens are minted on the host against the
+  #    Keycloak NodePort, not from inside the cluster.
+  #    This value is THE source of WALLET_AUTH_ISSUER (configmap.yaml); do not
+  #    derive it from nodePorts: the NodePort is never in an `iss`.
+  issuer: http://localhost:8080/realms/wallet
+  # -- JWKS is fetched by the pod itself, so it uses cluster DNS and cannot be
+  #    localhost. Only used when keycloak.enabled=false.
+  jwksURL: ""
+
+# -- Used only when postgresql.enabled=false: point at a managed database.
+externalDatabase:
+  dsn: ""
+
+observability:
+  # -- Bring up Collector + Tempo + Loki + Prometheus + Grafana, mirroring the
+  #    compose "observability" profile. Off by default so the core environment
+  #    stays minimal.
+  enabled: false
+  # -- Export sample ratio, applied when tracing is on.
+  sampleRatio: "1.0"
+  # -- OTLP endpoint used when the in-cluster collector is not deployed.
+  endpoint: ""
+  otel:
+    # -- Turn OTLP export on for the app. Separate from observability.enabled so
+    #    the app can export to an endpoint of your choosing.
+    enabled: false
+    endpoint: ""
+
+# -- GitOps path: ArgoCD + an in-cluster git host holding a copy of this
+#    directory. Off by default; `make kind-argocd` turns it on. See the header
+#    of templates/argocd-gitea.yaml for why a git host rather than a local path.
+argocd:
+  enabled: false

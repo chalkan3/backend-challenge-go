@@ -1,0 +1,111 @@
+{{/*
+Keycloak — OIDC IdP. The realm `wallet` is imported from deploy/keycloak via a
+ConfigMap, exactly like the compose bind-mount, so `--import-realm` sees the
+same clients and secrets (provider-a/-b, wallet-internal).
+*/}}
+{{- if .Values.keycloak.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "wallet.fullname" . }}-keycloak-realm
+  labels:
+    {{- include "wallet.labels" . | nindent 4 }}
+data:
+  realm-wallet.json: |-
+{{ .Files.Get "files/keycloak/realm-wallet.json" | indent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "wallet.fullname" . }}-keycloak
+  labels:
+    {{- include "wallet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: keycloak
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "wallet.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: keycloak
+  template:
+    metadata:
+      annotations:
+        # Re-roll when the realm definition changes (Helm has no native hook).
+        checksum/realm: {{ .Files.Get "files/keycloak/realm-wallet.json" | sha256sum }}
+      labels:
+        {{- include "wallet.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: keycloak
+    spec:
+      containers:
+        - name: keycloak
+          image: "{{ .Values.keycloak.image.repository }}:{{ .Values.keycloak.image.tag }}"
+          imagePullPolicy: {{ .Values.keycloak.image.pullPolicy }}
+          args: ["start-dev", "--import-realm", "--http-enabled=true"]
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: health
+              containerPort: 9000
+          env:
+            - name: KC_BOOTSTRAP_ADMIN_USERNAME
+              value: {{ .Values.keycloak.admin.username | quote }}
+            - name: KC_BOOTSTRAP_ADMIN_PASSWORD
+              value: {{ .Values.keycloak.admin.password | quote }}
+            - name: KC_HOSTNAME_STRICT
+              value: "false"
+            - name: KC_HEALTH_ENABLED
+              value: "true"
+            # Keycloak is a JVM app: `start-dev --import-realm` builds the whole
+            # model in memory and is killed (exit 137) under the 1Gi limit that
+            # is enough for the other components. Pin the heap *below* the
+            # container limit so the JVM GCs instead of being OOMKilled, and
+            # leave room for metaspace/threads outside the heap.
+            - name: JAVA_OPTS_APPEND
+              value: "-XX:MaxRAMPercentage=70 -XX:InitialRAMPercentage=30"
+          # Same readiness signal as the compose healthcheck (management port
+          # 9000), so nothing proceeds until the realm is actually imported.
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: health
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: health
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            failureThreshold: 10
+          resources:
+            {{- toYaml .Values.keycloak.resources | nindent 12 }}
+          volumeMounts:
+            - name: realm
+              mountPath: /opt/keycloak/data/import
+              readOnly: true
+      volumes:
+        - name: realm
+          configMap:
+            name: {{ include "wallet.fullname" . }}-keycloak-realm
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "wallet.keycloakHost" . }}
+  labels:
+    {{- include "wallet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: keycloak
+spec:
+  type: NodePort
+  selector:
+    {{- include "wallet.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: keycloak
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      nodePort: {{ .Values.nodePorts.keycloak }}
+{{- end }}

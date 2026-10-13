@@ -1,0 +1,110 @@
+{{/*
+LocalStack — the AWS SQS stand-in. Not a subchart because no maintained chart
+matches the image and the init semantics docker-compose.yml relies on: the
+queues must exist before the app starts consuming, and the exact FIFO/DLQ
+attributes (ContentBasedDeduplication, RedrivePolicy maxReceiveCount=5) must
+match what the Go code expects.
+
+The init script is mounted at /etc/localstack/init/ready.d, the same hook the
+compose service uses, so provisioning happens once the emulator is ready and
+the pod's readiness gate then means "queues are provisioned", not merely
+"container is up".
+*/}}
+{{- if .Values.sqs.localstack.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "wallet.fullname" . }}-localstack-init
+  labels:
+    {{- include "wallet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: localstack
+data:
+  10-queues.py: |
+{{ .Files.Get "files/localstack/init/10-queues.py" | indent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "wallet.fullname" . }}-localstack
+  labels:
+    {{- include "wallet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: localstack
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "wallet.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: localstack
+  template:
+    metadata:
+      labels:
+        {{- include "wallet.labels" . | nindent 8 }}
+        app.kubernetes.io/component: localstack
+    spec:
+      containers:
+        - name: localstack
+          image: {{ .Values.sqs.localstack.image | quote }}
+          ports:
+            - name: edge
+              containerPort: 4566
+          env:
+            - name: SERVICES
+              value: sqs
+            - name: AWS_DEFAULT_REGION
+              value: {{ .Values.sqs.external.region | quote }}
+            - name: EAGER_SERVICE_LOADING
+              value: "1"
+          readinessProbe:
+            # `awslocal sqs list-queues` succeeding proves the emulator AND the
+            # init hook both ran — equivalent to the compose healthcheck.
+            #
+            # timeoutSeconds is raised from the 1s default on purpose: awslocal
+            # is a Python wrapper around a boto3 call, and cold-starting the
+            # interpreter inside the container reliably takes longer than a
+            # second. With the default, the probe reports
+            #   command timed out after 1s
+            # even when the broker is perfectly healthy, and the pod never
+            # becomes Ready.
+            exec:
+              command: ["sh", "-c", "awslocal sqs list-queues >/dev/null 2>&1"]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 10
+            failureThreshold: 30
+          volumeMounts:
+            - name: init
+              mountPath: /etc/localstack/init/ready.d
+          resources:
+            requests: { cpu: 50m, memory: 256Mi }
+            limits:   { cpu: "1", memory: 1Gi }
+      volumes:
+        - name: init
+          configMap:
+            name: {{ include "wallet.fullname" . }}-localstack-init
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "wallet.fullname" . }}-localstack
+  labels:
+    {{- include "wallet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: localstack
+spec:
+  {{- if .Values.service.exposeNodePorts }}
+  type: NodePort
+  {{- else }}
+  type: ClusterIP
+  {{- end }}
+  ports:
+    - name: edge
+      port: 4566
+      targetPort: edge
+      {{- if .Values.service.exposeNodePorts }}
+      nodePort: {{ .Values.nodePorts.localstack }}
+      {{- end }}
+  selector:
+    {{- include "wallet.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: localstack
+{{- end }}

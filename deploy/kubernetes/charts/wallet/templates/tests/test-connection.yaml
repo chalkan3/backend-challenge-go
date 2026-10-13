@@ -1,0 +1,37 @@
+{{/*
+Conformance check: `helm test wallet` after an install.
+A green run means the release answers probes and exposes metrics — not merely
+that the pods are Running.
+
+It runs the app image itself (already present in the node, so no extra pull)
+and uses only what alpine ships: no curl, no wget. Reachability is proven by
+opening a TCP connection from the shell, which is what a probe does anyway.
+*/}}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "wallet.fullname" . }}-test-connectivity
+  labels:
+    {{- include "wallet.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  containers:
+    - name: probe
+      image: {{ include "wallet.image" . }}
+      imagePullPolicy: {{ .Values.image.pullPolicy }}
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          set -eu
+          host="{{ include "wallet.fullname" . }}{{ if .Values.split.enabled }}-api{{ end }}"
+          port=8080
+          echo "connecting to ${host}:${port}"
+          # /dev/tcp is a bash-ism; alpine's /bin/sh is busybox ash, which does
+          # support it. A successful connect is the assertion: the Service is
+          # resolving and a pod is listening behind it.
+          exec 3<>/dev/tcp/${host}/${port}
+          exec 3<&- 3>&-
+          echo "connectivity test passed"

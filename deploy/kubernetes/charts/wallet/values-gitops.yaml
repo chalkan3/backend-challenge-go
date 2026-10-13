@@ -1,0 +1,46 @@
+# Values used by the ArgoCD Application (deploy/kubernetes/argocd/application.yaml).
+#
+# Kept separate from the chart's values.yaml on purpose: values.yaml documents
+# every knob and carries the defaults, this file records the choices the GitOps
+# environment deliberately makes. A diff between the two is a diff between
+# "what the chart can do" and "what we decided to run".
+#
+# Environment-specific decisions, and why:
+#   - observability.enabled=true: the point of the GitOps path is to show the
+#     full environment reconciled declaratively, telemetry included.
+#   - image.tag is a fixed tag, never "latest": ArgoCD reconciles on the
+#     manifest, so the tag has to be a value it can converge to. `make
+#     kind-image` builds this tag and loads it into the node before syncing.
+
+image:
+  repository: localhost/wallet
+  tag: "dev"
+  pullPolicy: IfNotPresent
+
+# Combined topology: the GitOps environment demonstrates reconciliation, not
+# role splitting. Flip `split: true` here to have ArgoCD converge to the
+# api/workers topology instead — the change lands as a git commit.
+split: false
+
+config:
+  logLevel: info
+  migrateOnStart: true
+
+postgresql:
+  enabled: true
+
+keycloak:
+  enabled: true
+
+sqs:
+  localstack:
+    enabled: true
+
+observability:
+  enabled: true
+  otel:
+    enabled: true
+    sampleRatio: 1.0
+
+service:
+  exposeNodePorts: true
