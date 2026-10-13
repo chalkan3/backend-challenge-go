@@ -1,6 +1,8 @@
 package domain_test
 
 import (
+	"fmt"
+	"math"
 	"testing"
 	"time"
 
@@ -283,6 +285,107 @@ func TestJournalPlayerDelta(t *testing.T) {
 	assert.ErrorIs(t, err, domain.ErrInvalidAccount)
 }
 
+// TestJournalOneSidedOverflowFailsAtConstruction pins WHY the Money.Add error
+// branch inside PlayerDelta is unreachable, rather than pretending to exercise
+// it.
+//
+// PlayerDelta sums the SIGNED legs of one account, so in principle an entry
+// could balance (each side representable) while a partial signed sum leaves
+// int64. That entry cannot be built, and this test proves the reason is
+// structural, not incidental: NewJournalEntry checks Balanced() during
+// construction, Balanced() calls total(DirectionDebit) first, and total() panics
+// on a one-sided overflow. So the very entry that would give PlayerDelta an
+// overflowing partial is refused — loudly — before an entry exists to ask.
+//
+// The consequence is deliberate: PlayerDelta's error return is defensive only.
+// Every reachable caller sees either a delta or ErrInvalidAccount. We assert the
+// reachable half (a zero-value entry has no postings -> fail closed) and the
+// unreachable half's guard (construction panics rather than handing back a
+// half-summed entry).
+func TestJournalOneSidedOverflowFailsAtConstruction(t *testing.T) {
+	walletID := uuid.New()
+	player := domain.PlayerWalletAccount(walletID)
+	house, err := domain.NewAccount(domain.AccountHouse, "")
+	require.NoError(t, err)
+
+	// A zero-value entry never reached NewJournalEntry: it has no postings, so
+	// PlayerDelta fails closed instead of inventing a zero delta. This is the
+	// only error PlayerDelta can return in practice.
+	var zero domain.JournalEntry
+	_, err = zero.PlayerDelta(walletID)
+	require.Error(t, err, "an entry with no postings must not report a delta")
+	assert.ErrorIs(t, err, domain.ErrInvalidAccount)
+
+	max, err := domain.NewMoney(math.MaxInt64, "BRL")
+	require.NoError(t, err)
+	// -MaxInt64 is the deepest debit Money can produce: Neg refuses MinInt64, so
+	// Neg.(-MaxInt64) alone fits. Two of them on one side do not.
+	negMax, err := max.Neg()
+	require.NoError(t, err)
+	assert.Equal(t, int64(-math.MaxInt64), negMax.AmountMinor())
+
+	cPlayer, err := domain.NewPosting(player, domain.DirectionCredit, max)
+	require.NoError(t, err)
+	cPlayer2, err := domain.NewPosting(player, domain.DirectionCredit, max)
+	require.NoError(t, err)
+	dPlayer, err := domain.NewPosting(player, domain.DirectionDebit, max)
+	require.NoError(t, err)
+	cHouse, err := domain.NewPosting(house, domain.DirectionCredit, max)
+	require.NoError(t, err)
+	dHouse, err := domain.NewPosting(house, domain.DirectionDebit, max)
+	require.NoError(t, err)
+	dHouse2, err := domain.NewPosting(house, domain.DirectionDebit, max)
+	require.NoError(t, err)
+
+	// Two max credits on the player side overflow total(CREDIT) — and therefore
+	// panic during Balanced(), during construction. The entry that would have
+	// made PlayerDelta overflow can never come into being.
+	txID := uuid.New()
+	assert.PanicsWithValue(t,
+		fmt.Sprintf("journal total overflow for transaction %s: %v", txID, domain.ErrMoneyOverflow),
+		func() {
+			_, _ = domain.NewJournalEntry(txID, "BRL",
+				[]domain.Posting{cPlayer, cPlayer2, dPlayer, cHouse, dHouse, dHouse2}, time.Now().UTC())
+		})
+}
+
+// TestJournalTotalsFailLoudOnOverflow pins the deliberate panic in total().
+//
+// An entry whose two sides carry DIFFERENT totals balances to false, but
+// NewJournalEntry rejects that before the entry exists — so the only way to
+// reach total() with a side that overflows while construction still succeeds is
+// for Balanced() to ask the overflowing question. It does: it computes
+// TotalDebits() first, so two max-valued debit legs against one max credit leg
+// panic during construction, at the summing, and not at the comparison.
+//
+// That ordering is the point of this test. A silent partial sum would have made
+// Balanced() compare garbage instead of failing, and Balanced() is what decides
+// whether an entry is written to the journal at all.
+func TestJournalTotalsFailLoudOnOverflow(t *testing.T) {
+	walletID := uuid.New()
+	player := domain.PlayerWalletAccount(walletID)
+	house, err := domain.NewAccount(domain.AccountHouse, "")
+	require.NoError(t, err)
+	now := time.Now().UTC()
+
+	max, err := domain.NewMoney(math.MaxInt64, "BRL")
+	require.NoError(t, err)
+	// Two max debit legs (their sum overflows) against one max credit leg.
+	dHouse, err := domain.NewPosting(house, domain.DirectionDebit, max)
+	require.NoError(t, err)
+	cHouse, err := domain.NewPosting(house, domain.DirectionCredit, max)
+	require.NoError(t, err)
+	cPlayer, err := domain.NewPosting(player, domain.DirectionCredit, max)
+	require.NoError(t, err)
+
+	txID := uuid.New()
+	assert.PanicsWithValue(t,
+		fmt.Sprintf("journal total overflow for transaction %s: %v", txID, domain.ErrMoneyOverflow),
+		func() {
+			_, _ = domain.NewJournalEntry(txID, "BRL", []domain.Posting{dHouse, cHouse, cPlayer}, now)
+		})
+}
+
 func TestEntryForMovementDirectionMapping(t *testing.T) {
 	walletID := uuid.New()
 	txID := uuid.New()
@@ -383,6 +486,131 @@ func TestEntryForMovementRejectsUnreconstructableMovement(t *testing.T) {
 	}, time.Now().UTC())
 	require.Error(t, err)
 	assert.ErrorIs(t, err, domain.ErrLedgerArithmetic)
+}
+
+// TestPlayerDeltaOrderIsIndependentOfPostingInputOrder is the property the
+// overflow walk depends on: PlayerDelta accumulates over the postings in the
+// order the journal stored them, so the result is only well defined if that
+// order does not depend on the order the caller happened to pass the legs in.
+//
+// The stakes are concrete. The legs of one account are indistinguishable by the
+// sort key, and NewJournalEntry uses sort.Slice, which is NOT stable — for
+// slices above sort's insertion-sort threshold equal keys may come out in any
+// order. Every entry the service currently builds has two legs, so it is
+// exercised only below that threshold, where the order does happen to be
+// preserved. This test pins the property rather than the mechanism: same legs
+// in, same delta out, whatever the length — the exact check that would fail the
+// day an unbalanced-but-overflowing entry like the one above became reachable.
+func TestPlayerDeltaOrderIsIndependentOfPostingInputOrder(t *testing.T) {
+	walletID := uuid.New()
+	player := domain.PlayerWalletAccount(walletID)
+	house, err := domain.NewAccount(domain.AccountHouse, "")
+	require.NoError(t, err)
+	now := time.Now().UTC()
+
+	ten, err := domain.NewMoney(1000, "BRL")
+	require.NoError(t, err)
+	three, err := domain.NewMoney(300, "BRL")
+	require.NoError(t, err)
+
+	cPlayer, err := domain.NewPosting(player, domain.DirectionCredit, ten)
+	require.NoError(t, err)
+	dPlayer, err := domain.NewPosting(player, domain.DirectionDebit, three)
+	require.NoError(t, err)
+	// Mirrored counterparty legs: the same two amounts, opposite directions,
+	// which is what keeps all four arrangements balanced.
+	dHouse, err := domain.NewPosting(house, domain.DirectionDebit, ten)
+	require.NoError(t, err)
+	cHouse, err := domain.NewPosting(house, domain.DirectionCredit, three)
+	require.NoError(t, err)
+
+	// player: -300 +1000 = +700 regardless of the order the legs arrive in.
+	legs := []domain.Posting{cPlayer, dPlayer, dHouse, cHouse}
+	arrangements := [][]domain.Posting{
+		{cPlayer, dPlayer, dHouse, cHouse},
+		{dPlayer, cPlayer, cHouse, dHouse},
+		{dHouse, cHouse, cPlayer, dPlayer},
+		{cHouse, dHouse, dPlayer, cPlayer},
+	}
+	for i, in := range arrangements {
+		entry, err := domain.NewJournalEntry(uuid.New(), "BRL", in, now)
+		require.NoError(t, err, "arrangement %d must balance", i)
+		require.Len(t, entry.Postings(), len(legs))
+
+		// Stability means the legs of the same account keep the CALLER's relative
+		// order — not a hardcoded one. Pull the player's legs out of the input in
+		// order and require the journal to have preserved exactly that.
+		var inputDirs, storedDirs []domain.Direction
+		for _, p := range in {
+			if p.Account().Key() == player.Key() {
+				inputDirs = append(inputDirs, p.Direction())
+			}
+		}
+		for _, p := range entry.Postings() {
+			if p.Account().Key() == player.Key() {
+				storedDirs = append(storedDirs, p.Direction())
+			}
+		}
+		assert.Equal(t, inputDirs, storedDirs,
+			"arrangement %d: equal-key legs must keep their input order (sort must be stable)", i)
+
+		// And the property that actually matters: the result must not depend on
+		// how the caller ordered the legs.
+		delta, err := entry.PlayerDelta(walletID)
+		require.NoError(t, err)
+		assert.Equal(t, int64(700), delta.AmountMinor(),
+			"arrangement %d: the delta must not depend on the caller's leg order", i)
+	}
+}
+
+// arms of EntryForMovement: the function synthesises two postings and a journal
+// entry, and a failure in either must reach the caller unchanged rather than be
+// swallowed or replaced by a generic error.
+//
+// The nil transaction id is the reachable trigger: NewPosting accepts the legs
+// (a zero uuid is still a valid account reference), and NewJournalEntry is the
+// one that refuses it. So the error must be ErrLedgerArithmetic and nothing may
+// be returned alongside it — a half-built entry must never escape.
+func TestEntryForMovementPropagatesPostingAndJournalErrors(t *testing.T) {
+	walletID := uuid.New()
+	now := time.Now().UTC()
+	stake, err := domain.NewMoney(2500, "BRL")
+	require.NoError(t, err)
+	movement := domain.Movement{
+		HasChange: true, Direction: domain.DirectionDebit, Amount: stake,
+	}
+
+	entry, ok, err := domain.EntryForMovement(walletID, uuid.Nil, domain.KindBet, movement, now)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, domain.ErrLedgerArithmetic)
+	assert.False(t, ok, "ok must be false whenever an error is returned")
+	assert.Equal(t, uuid.Nil, entry.TransactionID(), "no partial entry may leak out")
+
+	// The same movement with a real transaction id does build the entry, which
+	// is what makes the assertion above about the id and not about the movement.
+	entry, ok, err = domain.EntryForMovement(walletID, uuid.New(), domain.KindBet, movement, now)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Len(t, entry.Postings(), 2)
+}
+
+// TestEntryForMovementRejectsUnknownDirectionAtPosting is the narrower claim
+// that the posting arms are exercised independently of the journal gate: a
+// movement that is neither DEBIT nor CREDIT and carries a positive amount gets
+// past the HasChange/positiveness guards and is stopped by the direction switch.
+func TestEntryForMovementRejectsUnknownDirectionAtPosting(t *testing.T) {
+	walletID := uuid.New()
+	stake, err := domain.NewMoney(2500, "BRL")
+	require.NoError(t, err)
+
+	for _, dir := range []domain.Direction{"", "SIDEWAYS", "Hold"} {
+		_, ok, err := domain.EntryForMovement(walletID, uuid.New(), domain.KindBet, domain.Movement{
+			HasChange: true, Direction: dir, Amount: stake,
+		}, time.Now().UTC())
+		require.Error(t, err, "direction %q must be refused", dir)
+		assert.ErrorIs(t, err, domain.ErrLedgerArithmetic)
+		assert.False(t, ok)
+	}
 }
 
 // TestDoubleEntryMirrorsWalletLedger is the property that ties the new layer to

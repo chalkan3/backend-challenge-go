@@ -178,8 +178,10 @@ type JournalEntry struct {
 //   - every posting shares the entry currency (no cross-currency entry);
 //   - the entry BALANCES: sum of credits == sum of debits, computed in Money so
 //     an overflow is reported rather than wrapped;
-//   - postings are stored sorted by account key, so the representation is
-//     deterministic and a rehydrated entry is byte-identical to a built one.
+//   - postings are stored sorted by account key with a STABLE sort, so the
+//     representation is deterministic for a given input: equal-key legs (two
+//     legs of one account) keep their relative order, and a rehydration that
+//     feeds the stored order back in is byte-identical to the built entry.
 func NewJournalEntry(transactionID uuid.UUID, currency string, postings []Posting, now time.Time) (JournalEntry, error) {
 	if transactionID == uuid.Nil {
 		return JournalEntry{}, ErrLedgerArithmetic.With("journal entry requires a transaction id")
@@ -196,7 +198,12 @@ func NewJournalEntry(transactionID uuid.UUID, currency string, postings []Postin
 
 	sorted := make([]Posting, len(postings))
 	copy(sorted, postings)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].account.Key() < sorted[j].account.Key() })
+	// SliceStable, not Slice: legs of the SAME account share a sort key, and
+	// their relative order is meaningful — PlayerDelta accumulates over the
+	// stored postings, so an unstable sort can change which intermediate sums
+	// overflow. Stability makes the canonical order a function of the input
+	// order alone, so the same legs always yield the same delta.
+	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].account.Key() < sorted[j].account.Key() })
 
 	entry := JournalEntry{transactionID: transactionID, currency: currency, postings: sorted, createdAt: now}
 	if !entry.Balanced() {
