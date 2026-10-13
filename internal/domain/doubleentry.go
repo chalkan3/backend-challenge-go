@@ -112,6 +112,10 @@ func PlayerWalletAccount(walletID uuid.UUID) Account {
 	return Account{kind: AccountPlayerWallet, ref: walletID.String()}
 }
 
+// HouseAccount is the singleton counterparty of every player movement: the
+// operator's side of a wager. It carries no ref (there is one house).
+func HouseAccount() Account { return Account{kind: AccountHouse} }
+
 // Kind returns the account kind.
 func (a Account) Kind() AccountKind { return a.kind }
 
@@ -315,7 +319,7 @@ func EntryForMovement(
 	}
 
 	player := PlayerWalletAccount(walletID)
-	house := Account{kind: AccountHouse}
+	house := HouseAccount()
 
 	var debit, credit Account
 	switch m.Direction {

@@ -59,6 +59,8 @@ type faults struct {
 	ledgerList      error
 	ledgerReconcile error
 
+	postingAppend error
+
 	inboxBegin    error
 	inboxComplete error
 
@@ -137,6 +139,9 @@ func (r *faultRepos) Transactions() service.TransactionRepository {
 	return &faultTxs{r.delegate.Transactions(), r.f}
 }
 func (r *faultRepos) Ledger() service.LedgerRepository { return &faultLedger{r.delegate.Ledger(), r.f} }
+func (r *faultRepos) Postings() service.PostingRepository {
+	return &faultPostings{r.delegate.Postings(), r.f}
+}
 func (r *faultRepos) Inbox() service.InboxRepository   { return &faultInbox{r.delegate.Inbox(), r.f} }
 func (r *faultRepos) Outbox() service.OutboxRepository { return &faultOutbox{r.delegate.Outbox(), r.f} }
 
@@ -295,6 +300,21 @@ func (r *faultLedger) Reconcile(ctx context.Context, id uuid.UUID) (int64, int64
 		return 0, 0, 0, r.f.ledgerReconcile
 	}
 	return r.next.Reconcile(ctx, id)
+}
+
+// faultPostings fails Append only when armed, so a test can prove the journal
+// write is inside the transaction boundary: a client that fails it must leave
+// the ledger, the balance and the transaction row untouched too.
+type faultPostings struct {
+	next service.PostingRepository
+	f    *faults
+}
+
+func (r *faultPostings) Append(ctx context.Context, e domain.JournalEntry) error {
+	if r.f.postingAppend != nil {
+		return r.f.postingAppend
+	}
+	return r.next.Append(ctx, e)
 }
 
 type faultInbox struct {

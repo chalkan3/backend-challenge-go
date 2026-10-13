@@ -67,6 +67,7 @@ func (r *relayRepos) Wallets() service.WalletRepository           { return nil }
 func (r *relayRepos) WalletOpens() service.WalletOpenRepository   { return nil }
 func (r *relayRepos) Transactions() service.TransactionRepository { return nil }
 func (r *relayRepos) Ledger() service.LedgerRepository            { return nil }
+func (r *relayRepos) Postings() service.PostingRepository         { return nil }
 func (r *relayRepos) Inbox() service.InboxRepository              { return nil }
 func (r *relayRepos) Outbox() service.OutboxRepository            { return r.outbox }
 
@@ -257,6 +258,7 @@ func (refRepos) Wallets() service.WalletRepository           { return nil }
 func (refRepos) WalletOpens() service.WalletOpenRepository   { return nil }
 func (refRepos) Transactions() service.TransactionRepository { return claimFailTxs{} }
 func (refRepos) Ledger() service.LedgerRepository            { return nil }
+func (refRepos) Postings() service.PostingRepository         { return nil }
 func (refRepos) Inbox() service.InboxRepository              { return nil }
 func (refRepos) Outbox() service.OutboxRepository            { return nil }
 

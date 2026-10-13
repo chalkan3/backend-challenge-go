@@ -118,6 +118,15 @@ arquitetura), table-driven e sem I/O.
   rodando. É somente-leitura: relata (`reconciliation_divergences_total`), nunca
   corrige — o ledger é a única fonte de verdade, uma divergência é fato a
   expor, não número a maquiar.
+- **Partidas dobradas**: além da perna unilateral, cada movimento grava sua
+  contraparte na tabela `postings`, na mesma transação do saldo
+  (`00004_postings.sql`; escrito em `finishProcessed` e na abertura de
+  carteira). O journal é imutável (triggers recusam `UPDATE`/`DELETE`) e a perna
+  do jogador é **amarrada à linha do ledger** — um posting de `PLAYER_WALLET`
+  sem a linha correspondente (mesma carteira, direção e valor) é rejeitado pelo
+  banco. O que a perna unilateral não consegue expressar, e que aqui passa a ser
+  auditável, é a conservação de valor: auditorias #11 (a entrada fecha), #11b
+  (todo movimento tem posting) e #11c (as pernas concordam com o histórico).
 
 ## 4. Idempotência
 
@@ -339,11 +348,6 @@ com `WALLET_OTEL_ENABLED=true`.
 ## 11. Limitações e trabalho não concluído
 
 - Escala monetária fixa 2 (sem JPY/KWD); sem conversão de moeda.
-- Partidas dobradas existem como **núcleo de domínio**
-  (`internal/domain/doubleentry.go`, com testes e prova por mutação), mas
-  **não estão plugadas ao ledger SQL**: não há tabela `postings`, nem gravação
-  da segunda perna junto de `finishProcessed`. Ligá-las é trabalho de schema +
-  wiring, não de modelagem.
 - O cenário 5 do §13 ("interromper o consumidor após o commit e antes do
   delete") tem harness automatizado — `test/integration/kill_after_commit_test.go`,
   determinístico via `commitGateTxManager` (sem depender de timing de

@@ -141,6 +141,22 @@ type LedgerRepository interface {
 	Reconcile(ctx context.Context, walletID uuid.UUID) (stored, sum int64, count int64, err error)
 }
 
+// PostingRepository stores the double-entry journal: the counterparty leg of
+// every wallet movement, in the same SQL transaction as the ledger row. It is
+// append-only, like the ledger it shadows.
+type PostingRepository interface {
+	// Append writes every posting of one balanced journal entry. The caller
+	// only ever passes an entry NewJournalEntry accepted, so an unbalanced set
+	// cannot reach here; the DB trigger additionally refuses any player leg
+	// that does not agree with the committed ledger row.
+	//
+	// There is deliberately no read method: the journal is written to be
+	// AUDITED (audits #11/#11b/#11c query it directly in SQL), not to be read
+	// back through the application. A port with no caller is API surface that
+	// has to be maintained and tested for nobody.
+	Append(ctx context.Context, e domain.JournalEntry) error
+}
+
 // InboxOutcome reports the state of the inbox row for a received message.
 type InboxOutcome struct {
 	Inserted  bool // row created by this call
@@ -191,6 +207,7 @@ type Repos interface {
 	WalletOpens() WalletOpenRepository
 	Transactions() TransactionRepository
 	Ledger() LedgerRepository
+	Postings() PostingRepository
 	Inbox() InboxRepository
 	Outbox() OutboxRepository
 }

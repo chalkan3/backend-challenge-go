@@ -203,6 +203,16 @@ func (s *WalletService) createWallet(
 	if err := r.Ledger().Append(ctx, entry); err != nil {
 		return err
 	}
+	// The opening is a movement like any other: it gets a counterparty leg too,
+	// so the journal is complete from the wallet's first row onward. Same
+	// transaction, same trigger check against the ledger row just written.
+	if journal, ok, err := domain.EntryForMovement(w.ID(), tx.ID(), tx.Kind(), mv, now); err != nil {
+		return err
+	} else if ok {
+		if err := r.Postings().Append(ctx, journal); err != nil {
+			return err
+		}
+	}
 	processed, err := domain.NewWagerTransactionProcessedEvent(tx)
 	if err != nil {
 		return err

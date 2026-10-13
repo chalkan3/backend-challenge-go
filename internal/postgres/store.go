@@ -55,6 +55,7 @@ func (r *repos) Wallets() service.WalletRepository           { return &walletRep
 func (r *repos) WalletOpens() service.WalletOpenRepository   { return &walletOpenRepo{ex: r.ex} }
 func (r *repos) Transactions() service.TransactionRepository { return &txRepo{ex: r.ex} }
 func (r *repos) Ledger() service.LedgerRepository            { return &ledgerRepo{ex: r.ex} }
+func (r *repos) Postings() service.PostingRepository         { return &postingRepo{ex: r.ex} }
 func (r *repos) Inbox() service.InboxRepository              { return &inboxRepo{ex: r.ex} }
 func (r *repos) Outbox() service.OutboxRepository {
 	return &outboxRepo{ex: r.ex, carrier: r.carrier}

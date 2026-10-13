@@ -76,13 +76,18 @@ SELECT 'AUDIT|7|idempotency keys are unique|' || count(*) FROM (
 ) d;
 
 -- 8. No PROCESSED money movement without a ledger row behind it.
---    Parallelism is disabled for this statement: the Postgres container's shared
---    memory segment is too small for a parallel worker here.
+--    A transaction whose amount is zero moved nothing, so it is not a movement
+--    and has no row to find: a fee-less LOSS is the case that exists today.
+--    OPENING is deliberately NOT excluded — it writes its own ledger row (the
+--    initial credit), and exempting it would hide a real opening that failed to
+--    record its balance. Parallelism is disabled for this statement: the
+--    Postgres container's shared memory segment is too small for a parallel
+--    worker here.
 SET max_parallel_workers_per_gather = 0;
 SELECT 'AUDIT|8|every processed transaction has a ledger entry|' || count(*)
 FROM wager_transactions t
 WHERE t.status = 'PROCESSED'
-  AND t.kind <> 'OPENING'
+  AND t.amount_minor <> 0
   AND NOT EXISTS (SELECT 1 FROM wallet_ledger_entries l WHERE l.transaction_id = t.id);
 RESET max_parallel_workers_per_gather;
 
@@ -96,3 +101,44 @@ WHERE t.status = 'REJECTED'
 --     shape when producers outrun the relay — but a large, growing number here
 --     is the signal that the relay needs scaling.
 SELECT 'INFO|10|outbox pending|' || count(*) FROM integration_outbox WHERE published_at IS NULL;
+
+-- 11. THE double-entry invariant: every journal entry balances. Grouping by
+--     transaction and summing credits minus debits, any non-zero total is a
+--     transaction that created or destroyed value. This is the check that the
+--     single-sided ledger structurally cannot express — it reconciles each
+--     account against itself, while this reconciles the accounts against each
+--     other.
+SELECT 'AUDIT|11|every journal entry balances|' || count(*) FROM (
+    SELECT transaction_id
+    FROM postings
+    GROUP BY transaction_id
+    HAVING SUM(CASE direction WHEN 'CREDIT' THEN amount_minor ELSE -amount_minor END) <> 0
+) d;
+
+-- 11b. Every movement has a journal entry. 11 says entries balance; this says
+--      they exist. A bank of accounts that never disagree is also what a bank
+--      of NO accounts looks like, so the pair is what actually constrains the
+--      system. OPENING is included on purpose: an opening is a credit to the
+--      player that has to come from somewhere. A zero-amount transaction is not
+--      a movement and posts nothing (a fee-less LOSS), matching audit #8.
+SET max_parallel_workers_per_gather = 0;
+SELECT 'AUDIT|11b|every processed movement has a journal entry|' || count(*)
+FROM wager_transactions t
+WHERE t.status = 'PROCESSED'
+  AND t.amount_minor <> 0
+  AND EXISTS (SELECT 1 FROM wallet_ledger_entries l WHERE l.transaction_id = t.id)
+  AND NOT EXISTS (SELECT 1 FROM postings p WHERE p.transaction_id = t.id);
+RESET max_parallel_workers_per_gather;
+
+-- 11c. The player leg equals the ledger row. The trigger enforces this on
+--      write; this reports whether the historical rows agree, which matters
+--      after a migration or a restore that bypassed the trigger.
+SELECT 'AUDIT|11c|player postings match their ledger rows|' || count(*)
+FROM wallet_ledger_entries l
+LEFT JOIN postings p
+    ON p.transaction_id = l.transaction_id
+    AND p.account_kind = 'PLAYER_WALLET'
+    AND p.account_ref = l.wallet_id::text
+WHERE p.id IS NULL
+   OR p.direction <> l.direction
+   OR p.amount_minor <> l.amount_minor;

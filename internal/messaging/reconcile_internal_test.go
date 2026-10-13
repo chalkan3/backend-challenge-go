@@ -73,6 +73,7 @@ type reconRepos struct{ s *reconStore }
 
 func (r reconRepos) Wallets() service.WalletRepository           { return reconWallets{r.s} }
 func (r reconRepos) Ledger() service.LedgerRepository            { return reconLedger{r.s} }
+func (r reconRepos) Postings() service.PostingRepository         { return nil }
 func (r reconRepos) WalletOpens() service.WalletOpenRepository   { return nil }
 func (r reconRepos) Transactions() service.TransactionRepository { return nil }
 func (r reconRepos) Inbox() service.InboxRepository              { return nil }

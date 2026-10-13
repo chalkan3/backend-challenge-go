@@ -77,8 +77,9 @@ func (r *ledgerRepos) Transactions() service.TransactionRepository {
 func (r *ledgerRepos) Ledger() service.LedgerRepository {
 	return ledgerLedger{s: r.store, openingMinor: r.openingMinor}
 }
-func (r *ledgerRepos) Inbox() service.InboxRepository   { return fakeInbox{} }
-func (r *ledgerRepos) Outbox() service.OutboxRepository { return fakeOutbox{r.store} }
+func (r *ledgerRepos) Postings() service.PostingRepository { return fakePostings{r.store} }
+func (r *ledgerRepos) Inbox() service.InboxRepository      { return fakeInbox{} }
+func (r *ledgerRepos) Outbox() service.OutboxRepository    { return fakeOutbox{r.store} }
 
 // ledgerLedger is fakeLedger with real pagination and reconciliation over the
 // shared in-memory ledger slice. Ordering is the insertion order of the slice
@@ -323,8 +324,9 @@ func (r *divergentRepos) Transactions() service.TransactionRepository {
 func (r *divergentRepos) Ledger() service.LedgerRepository {
 	return divergentLedger{s: r.store, openingMinor: r.openingMinor}
 }
-func (r *divergentRepos) Inbox() service.InboxRepository   { return fakeInbox{} }
-func (r *divergentRepos) Outbox() service.OutboxRepository { return fakeOutbox{r.store} }
+func (r *divergentRepos) Postings() service.PostingRepository { return fakePostings{r.store} }
+func (r *divergentRepos) Inbox() service.InboxRepository      { return fakeInbox{} }
+func (r *divergentRepos) Outbox() service.OutboxRepository    { return fakeOutbox{r.store} }
 
 type divergentLedger struct {
 	s            *fakeStore
@@ -813,6 +815,7 @@ func (r *racyRepos) WalletOpens() service.WalletOpenRepository {
 }
 func (r *racyRepos) Transactions() service.TransactionRepository { return racyTxs{r.store} }
 func (r *racyRepos) Ledger() service.LedgerRepository            { return fakeLedger{r.store} }
+func (r *racyRepos) Postings() service.PostingRepository         { return fakePostings{r.store} }
 func (r *racyRepos) Inbox() service.InboxRepository              { return fakeInbox{} }
 func (r *racyRepos) Outbox() service.OutboxRepository            { return fakeOutbox{r.store} }
 

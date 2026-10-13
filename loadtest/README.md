@@ -141,9 +141,12 @@ e passa somente com `<valor> == 0`. Linhas `INFO|` são reportadas e não falham
 | 5 | `version` = nº de entradas | contador de operações perdendo eventos |
 | 6 | Uma carteira por (jogador, moeda) | unicidade do schema violada |
 | 7 | Chaves de idempotência únicas | replay virou débito duplo |
-| 8 | PROCESSED tem lançamento | dinheiro movido sem rastro |
+| 8 | PROCESSED não-nulo tem lançamento | dinheiro movido sem rastro |
 | 9 | REJECTED não moveu dinheiro | recusa que debitou mesmo assim |
 | 10 | Backlog do outbox | *informacional* — ver abaixo |
+| 11 | Journal fecha (créditos == débitos por transação) | uma transação criou ou destruiu valor |
+| 11b | Todo movimento processado tem posting | ledger com rastro, journal sem contraparte |
+| 11c | Perna do jogador == linha do ledger | journal divergiu do dinheiro que moveu |
 
 > [!NOTE]
 > **Backlog do outbox é informativo, não falha.** Depois de rodar os cenários, o

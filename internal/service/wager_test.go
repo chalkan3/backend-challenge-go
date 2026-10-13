@@ -34,6 +34,7 @@ type fakeStore struct {
 	txByKey  map[string]*domain.WagerTransaction // provider|idempotencyKey
 	txByExt  map[string]*domain.WagerTransaction // provider|externalTransactionId
 	ledger   []domain.LedgerEntry
+	journal  []domain.JournalEntry
 	outbox   []domain.Envelope
 	opens    map[string]fakeOpen // idempotencyKey -> recorded opening
 	outcomes []string            // recorded service.Instrumentation.WagerOutcome lines
@@ -119,6 +120,7 @@ func (r *fakeRepos) Wallets() service.WalletRepository           { return fakeWa
 func (r *fakeRepos) WalletOpens() service.WalletOpenRepository   { return fakeWalletOpens{r.store} }
 func (r *fakeRepos) Transactions() service.TransactionRepository { return fakeTxs{r.store} }
 func (r *fakeRepos) Ledger() service.LedgerRepository            { return fakeLedger{r.store} }
+func (r *fakeRepos) Postings() service.PostingRepository         { return fakePostings{r.store} }
 func (r *fakeRepos) Inbox() service.InboxRepository              { return fakeInbox{} }
 func (r *fakeRepos) Outbox() service.OutboxRepository            { return fakeOutbox{r.store} }
 
@@ -288,6 +290,17 @@ func (r fakeLedger) ListByWallet(context.Context, uuid.UUID, *service.LedgerCurs
 
 func (r fakeLedger) Reconcile(context.Context, uuid.UUID) (int64, int64, int64, error) {
 	return 0, 0, 0, nil
+}
+
+// fakePostings records journal entries so tests can assert the second leg was
+// written, and reads them back so a rehydrated entry can be compared.
+type fakePostings struct{ s *fakeStore }
+
+func (r fakePostings) Append(_ context.Context, e domain.JournalEntry) error {
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	r.s.journal = append(r.s.journal, e)
+	return nil
 }
 
 type fakeInbox struct{}

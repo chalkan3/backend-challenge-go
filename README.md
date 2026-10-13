@@ -1004,34 +1004,68 @@ o saldo por `loadtest/sql/invariants.sql` (auditoria #4). O que ele *não* expre
 é a segunda perna: **todo débito é crédito em algum lugar**, de modo que o
 sistema conserve valor como um todo.
 
-`internal/domain/doubleentry.go` adiciona essa segunda perna como **núcleo de
+`internal/domain/doubleentry.go` modela essa segunda perna como **núcleo de
 domínio puro** (sem I/O, sem dependência de infraestrutura):
 
 | Conceito | Papel |
 | :-- | :-- |
-| `Account` | balde de valor identificado por `(kind, ref)` — `PLAYER_WALLET`, `HOUSE`, `PROVIDER_SETTLEMENT`, `REVENUE`; as duas últimas são *singleton* sem `ref` |
+| `Account` | balde de valor identificado por `(kind, ref)` — `PLAYER_WALLET`, `HOUSE`, `PROVIDER_SETTLEMENT`, `REVENUE`; `HOUSE` e `REVENUE` são *singleton* sem `ref` |
 | `Posting` | uma perna imutável: direction (`DEBIT`/`CREDIT`) + `Money` |
 | `JournalEntry` | as pernas de uma transação; **rejeita entrada desbalanceada** na construção e ordena as pernas por conta (forma canônica) |
 
 Cada movimento vira duas pernas — `BET` debita a carteira do jogador e credita a
 casa; `WIN` faz o inverso — e `PlayerDelta(walletID)` recupera a variação do
-jogador somando as pernas assinadas, que é a checagem de consistência
-correspondente ao lado SQL.
+jogador somando as pernas assinadas.
 
-> [!IMPORTANT]
-> **Estado:** este é um núcleo de domínio exercitado por testes (13 funções,
-> 95% de cobertura), **ainda não plugado ao ledger SQL**. A segunda perna é
-> computável a partir de qualquer transação, mas hoje não é persistida em uma
-> tabela `postings` nem gravada na mesma transação de `finishProcessed`; a
-> auditoria de invariantes cobre a cadeia unilateral. Está documentado assim —
-> em vez de omitido — porque a honestidade sobre o alcance de uma peça é parte
-> da entrega; ligá-la ao fluxo é trabalho de schema + wiring, não de modelagem.
+**E está gravado, não só modelado.** A migration `00004_postings.sql` cria a
+tabela `postings`, e o serviço escreve a segunda perna **dentro da mesma
+transação SQL** do saldo, em dois pontos: `finishProcessed` (BET/WIN/REFUND/
+ROLLBACK) e a abertura de carteira. Um movimento que não consiga registrar sua
+contraparte não é aplicado — as duas escritas commitam juntas ou não commitam.
 
-Também há dois testes que mudam de comportamento quando o invariante é violado —
-prova por mutação: forçar `Balanced()` a `return true` e trocar as pernas de
-`BET` (`player, house` → `player, player`) fazem a suíte falhar, o que mostra que
-os testes mordem a aritmética e não apenas a API.
+O que a tabela garante, e onde é imposto:
 
+| Garantia | Onde |
+| :-- | :-- |
+| O journal **não pode ser editado** | triggers `posting_no_update`/`posting_no_delete` recusam `UPDATE`/`DELETE` — journal que se edita não é evidência |
+| A perna do jogador **não pode divergir do ledger** | trigger `posting_matches_ledger_check`: um posting `PLAYER_WALLET` sem a linha de ledger correspondente (mesma carteira, direção e valor) é rejeitado no `INSERT` |
+| Cada transação **fecha** | auditoria #11: agrupa por transação e soma créditos − débitos; não-zero é uma transação que criou ou destruiu valor |
+| Nenhum movimento **sem journal** | auditoria #11b: movimento processado com linha de ledger mas sem posting |
+| As pernas **concordam com o histórico** | auditoria #11c: pega divergência introduzida por restore ou migração que passou por fora do trigger |
+
+> [!NOTE]
+> A perna do jogador no journal **é** a linha do ledger: mesmo
+> `(transaction_id, direction, amount_minor)`. A tabela `postings` é um
+> superconjunto — carrega também a contraparte —, então o ledger continua sendo o
+> caminho rápido para a aritmética de saldo e o journal passa a ser o caminho de
+> auditoria, que responde "e quem estava do outro lado?".
+
+O valor não está em ter a tabela; está em a invariante ser **verificável** depois
+do tráfego:
+
+```
+AUDIT|11|every journal entry balances|0
+AUDIT|11b|every processed movement has a journal entry|0
+AUDIT|11c|player postings match their ledger rows|0
+```
+
+E as auditorias **mordem**: contra um desbalanço plantado de propósito o detector
+acusa (`CONTROL|11|planted imbalance detected (want 1)|1`) e uma perna divergente
+é sinalizada (`CONTROL|11c|divergent player leg flagged (want 1)|1`) — auditoria
+que nunca falha é indistinguível de auditoria que não roda. Isso foi medido, não
+presumido.
+
+Dois níveis de teste sustentam a ligação:
+
+| Nível | O que prova |
+| :-- | :-- |
+| Unitário (`internal/service/doubleentry_wiring_test.go`) | BET debita o jogador e credita a casa; WIN é o espelho; OPENING nasce com journal; LOSS (valor zero) não escreve nada |
+| Integração (`test/integration/journal_test.go`) | contra Postgres: a entrada existe e fecha, a perna do jogador bate com o ledger, o trigger **recusa** uma perna divergente, e um BET rejeitado não deixa journal |
+
+Os testes de domínio originais seguem valendo, inclusive a prova por mutação:
+forçar `Balanced()` a `return true` e trocar as pernas de `BET`
+(`player, house` → `player, player`) fazem a suíte falhar — os testes mordem a
+aritmética, não apenas a API.
 ---
 
 <div align="center">

@@ -514,6 +514,20 @@ func (s *WagerService) finishProcessed(ctx context.Context, r Repos, t *domain.W
 		if err := r.Ledger().Append(ctx, entry); err != nil {
 			return WagerResult{}, err
 		}
+		// The second leg. The ledger row above says what happened to the
+		// player's wallet; this journal entry adds the counterparty so debits
+		// and credits balance. It is written in the SAME transaction as the
+		// money it describes, and its player leg is checked against the ledger
+		// row by the DB trigger — the journal can never drift from the ledger.
+		// A zero-amount movement returns ok=false with no entry (nothing moved,
+		// so there is nothing to post), mirroring the LOSS case.
+		if journal, ok, err := domain.EntryForMovement(w.ID(), t.ID(), t.Kind(), *mv, now); err != nil {
+			return WagerResult{}, err
+		} else if ok {
+			if err := r.Postings().Append(ctx, journal); err != nil {
+				return WagerResult{}, err
+			}
+		}
 		if err := r.Wallets().UpdateBalance(ctx, w); err != nil {
 			return WagerResult{}, err
 		}
