@@ -37,7 +37,7 @@ carteira**.
 - **API** — [Endpoints](pt/api/reference.md) · [Erros](pt/api/errors.md) · [Idempotência](pt/api/idempotency.md) · [Exemplos](pt/api/examples.md)
 - **Dados** — [Schema](pt/data/schema.md) · [Ledger](pt/data/ledger.md) · [Outbox & Inbox](pt/data/outbox-inbox.md)
 - **Mensageria** — [Visão geral](pt/messaging/overview.md) · [Consumer](pt/messaging/consumer.md) · [Relay](pt/messaging/relay.md) · [Reference worker](pt/messaging/reference-worker.md)
-- **Operação** — [Configuração](pt/operations/configuration.md) · [Observabilidade](pt/operations/observability.md) · [Testes](pt/operations/testing.md) · [Testes de carga](pt/operations/load-testing.md) · [Kubernetes](pt/operations/kubernetes.md) · [Infraestrutura](pt/operations/infrastructure.md) · [Solução de problemas](pt/operations/troubleshooting.md)
+- **Operação** — [Configuração](pt/operations/configuration.md) · [Observabilidade](pt/operations/observability.md) · [Testes](pt/operations/testing.md) · [Testes de carga](pt/operations/load-testing.md) · [Kubernetes](pt/operations/kubernetes.md) · [Infraestrutura](pt/operations/infrastructure.md) · [Processo de release](pt/operations/release-process.md) · [Solução de problemas](pt/operations/troubleshooting.md)
 - **Contribuindo** — [Estrutura do projeto](pt/contributing/project-structure.md) · [Convenções](pt/contributing/conventions.md) · [Decisões](pt/contributing/decisions.md)
 
 ### 🇺🇸 English — [open home](en/index.md)
@@ -47,7 +47,7 @@ carteira**.
 - **API** — [Endpoints](en/api/reference.md) · [Errors](en/api/errors.md) · [Idempotency](en/api/idempotency.md) · [Examples](en/api/examples.md)
 - **Data** — [Schema](en/data/schema.md) · [Ledger](en/data/ledger.md) · [Outbox & Inbox](en/data/outbox-inbox.md)
 - **Messaging** — [Overview](en/messaging/overview.md) · [Consumer](en/messaging/consumer.md) · [Relay](en/messaging/relay.md) · [Reference worker](en/messaging/reference-worker.md)
-- **Operations** — [Configuration](en/operations/configuration.md) · [Observability](en/operations/observability.md) · [Testing](en/operations/testing.md) · [Load testing](en/operations/load-testing.md) · [Kubernetes](en/operations/kubernetes.md) · [Infrastructure](en/operations/infrastructure.md) · [Troubleshooting](en/operations/troubleshooting.md)
+- **Operations** — [Configuration](en/operations/configuration.md) · [Observability](en/operations/observability.md) · [Testing](en/operations/testing.md) · [Load testing](en/operations/load-testing.md) · [Kubernetes](en/operations/kubernetes.md) · [Infrastructure](en/operations/infrastructure.md) · [Release process](en/operations/release-process.md) · [Troubleshooting](en/operations/troubleshooting.md)
 - **Contributing** — [Project structure](en/contributing/project-structure.md) · [Conventions](en/contributing/conventions.md) · [Decisions](en/contributing/decisions.md)
 
 ---
