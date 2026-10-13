@@ -145,7 +145,7 @@ func TestKillAfterCommitBeforeDelete(t *testing.T) {
 		svc:    svc,
 		hook:   &recordingMetrics{},
 	}
-	h1.cons = messaging.NewConsumer(client, h1.urls, cfg, gate, svc, h1.hook, testLogger)
+	h1.cons = messaging.NewConsumer(client, h1.urls, cfg, gate, svc, h1.hook, nil, testLogger)
 
 	sendCtx, sendCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	_, err = client.SendMessage(sendCtx, &awssqs.SendMessageInput{
@@ -218,7 +218,7 @@ func TestKillAfterCommitBeforeDelete(t *testing.T) {
 		svc:    svc,
 		hook:   hook2,
 	}
-	h2.cons = messaging.NewConsumer(client, h2.urls, cfg, store, svc, hook2, testLogger)
+	h2.cons = messaging.NewConsumer(client, h2.urls, cfg, store, svc, hook2, nil, testLogger)
 	h2.run(t)
 
 	require.Eventually(t, func() bool {

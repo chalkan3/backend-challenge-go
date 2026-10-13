@@ -75,7 +75,7 @@ type endpointHarness struct {
 
 func newEndpointHarness(t *testing.T) *endpointHarness {
 	t.Helper()
-	store := postgres.NewStore(endpointPool(t))
+	store := postgres.NewStore(endpointPool(t), nil)
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	hook := silentHook{}
 	ws := service.NewWalletService(store, log, hook)

@@ -86,6 +86,12 @@ var App = fx.Options(
 	fx.Module("telemetry",
 		fx.Provide(newTelemetryProvider),
 		fx.Provide(newLoggerProvider),
+		// One carrier, two ports: the SQL adapter injects the trace context
+		// into the outbox row, the consumer extracts it from the SQS message.
+		fx.Provide(
+			fx.Annotate(otel.NewCarrier, fx.As(new(service.SpanCarrier))),
+			fx.Annotate(otel.NewCarrier, fx.As(new(messaging.TraceExtractor))),
+		),
 		fx.Invoke(registerTelemetry),
 	),
 	fx.Module("auth", fx.Provide(auth.NewAuthenticator)),

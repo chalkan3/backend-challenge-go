@@ -154,10 +154,19 @@ type OutboxItem struct {
 	EventType   string
 	Attempts    int
 	Payload     []byte
+	// TraceParent is the W3C traceparent captured when the event was
+	// enqueued (inside the balance transaction). The publisher forwards it
+	// with the message so the consumer resumes the originating trace instead
+	// of starting an unrelated one. Empty means the request had no upstream
+	// trace context.
+	TraceParent string
 }
 
 // OutboxRepository is the transactional outbox store.
 type OutboxRepository interface {
+	// Enqueue writes the envelopes durably. It captures the trace context
+	// active in ctx as the row's trace_parent, so the relay can resume the
+	// trace of the request that produced the event.
 	Enqueue(ctx context.Context, envelopes []domain.Envelope) error
 	// ClaimBatch leases rows (attempts++, available_at += lease) using
 	// FOR UPDATE SKIP LOCKED; crashed publishers are recovered when the
@@ -203,6 +212,30 @@ type Instrumentation interface {
 	// context plus a Span façade. It never returns a nil Span, so call sites
 	// never need a nil check (a disabled tracer yields a no-op span).
 	StartSpan(ctx context.Context, name string, attrs ...SpanAttr) (context.Context, Span)
+}
+
+// SpanCarrier serialises and restores trace context across a boundary that
+// cannot carry a context.Context — here, the integration_outbox row and the
+// SQS message body that outlives the request.
+//
+// It exists because the outbox deliberately breaks the call chain: the HTTP
+// request commits and returns, while a detached relay publishes the event
+// afterwards. Without a way to persist the W3C traceparent and resume it on
+// the far side, the relay's trace is unrelated to the request that caused it.
+//
+// Keeping this a port — rather than calling the tracing SDK directly — is the
+// same boundary the Span façade enforces: the service and messaging packages
+// stay free of SDK imports, and the format (W3C traceparent today) is an
+// adapter's concern. An empty Inject result means "no active trace context",
+// which is not an error: the far side simply starts a new trace.
+type SpanCarrier interface {
+	// Inject renders the span active in ctx as a transferable string, or ""
+	// when ctx carries no sampled trace context.
+	Inject(ctx context.Context) string
+	// Extract returns a context carrying the trace described by carrier as a
+	// remote parent. An empty or malformed carrier yields ctx unchanged, so a
+	// missing link degrades to a new trace instead of failing the work.
+	Extract(ctx context.Context, carrier string) context.Context
 }
 
 // SpanAttr is one key/value attribute attached to a span. The port speaks

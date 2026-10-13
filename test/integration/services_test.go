@@ -19,7 +19,7 @@ import (
 func newTestStore(t *testing.T) *postgres.Store {
 	t.Helper()
 	pool := mustDB(t)
-	return postgres.NewStore(pool)
+	return postgres.NewStore(pool, nil)
 }
 
 func newTestWagerService(t *testing.T, store *postgres.Store, maxAttempts int, ttl time.Duration) *service.WagerService {

@@ -73,7 +73,7 @@ func claimOnce(t *testing.T, store *postgres.Store, now time.Time, lease time.Du
 // ever leased by two of them.
 func TestTwoPublishersRaceSameOutboxClaimsEachRowOnce(t *testing.T) {
 	ctx := context.Background()
-	store := postgres.NewStore(mustDB(t))
+	store := postgres.NewStore(mustDB(t), nil)
 
 	const (
 		backlog  = 60
@@ -149,7 +149,7 @@ func TestTwoPublishersRaceSameOutboxClaimsEachRowOnce(t *testing.T) {
 // because a publisher was interrupted mid-flight.
 func TestOutboxRecoveredWhenSecondPublisherTakesOver(t *testing.T) {
 	ctx := context.Background()
-	store := postgres.NewStore(mustDB(t))
+	store := postgres.NewStore(mustDB(t), nil)
 
 	eventIDs, dueAt := seedOutboxBacklog(t, ctx, store, 1)
 	var eventID string
@@ -212,7 +212,7 @@ func TestOutboxRecoveredWhenSecondPublisherTakesOver(t *testing.T) {
 //     test's parallel-progress expectation.
 func TestPublishedRowsAreNeverClaimedAgain(t *testing.T) {
 	ctx := context.Background()
-	store := postgres.NewStore(mustDB(t))
+	store := postgres.NewStore(mustDB(t), nil)
 
 	eventIDs, dueAt := seedOutboxBacklog(t, ctx, store, 3)
 

@@ -47,13 +47,16 @@ type Consumer struct {
 	txm    service.TxManager
 	svc    *service.WagerService
 	hook   ConsumerMetrics
+	tracer TraceExtractor
 	log    *slog.Logger
 }
 
 // NewConsumer wires the consumer with its queue endpoints, transaction
-// manager, use case and observation port.
-func NewConsumer(client *sqs.Client, urls sqsinfra.QueueURLs, cfg *config.Config, txm service.TxManager, svc *service.WagerService, hook ConsumerMetrics, log *slog.Logger) *Consumer {
-	return &Consumer{client: client, urls: urls, cfg: cfg, txm: txm, svc: svc, hook: hook,
+// manager, use case, observation port and trace extractor. The extractor
+// resumes the trace the producer forwarded with the message; a nil-tolerant
+// empty carrier degrades to a fresh trace.
+func NewConsumer(client *sqs.Client, urls sqsinfra.QueueURLs, cfg *config.Config, txm service.TxManager, svc *service.WagerService, hook ConsumerMetrics, tracer TraceExtractor, log *slog.Logger) *Consumer {
+	return &Consumer{client: client, urls: urls, cfg: cfg, txm: txm, svc: svc, hook: hook, tracer: tracer,
 		log: log.With(slog.String("worker", "consumer"))}
 }
 
@@ -88,6 +91,11 @@ intake:
 			AttributeNames: []awssqstypes.QueueAttributeName{
 				awssqstypes.QueueAttributeName("ApproximateReceiveCount"),
 			},
+			// Custom message attributes (the forwarded traceparent) are only
+			// returned when explicitly requested — unlike the envelope, which
+			// travels in the body. Without this the consumer would silently
+			// lose the trace and start an unrelated one.
+			MessageAttributeNames: []string{sqsinfra.TraceParentAttribute},
 		})
 		if err != nil {
 			if ctx.Err() != nil {
@@ -135,6 +143,14 @@ func (c *Consumer) handle(ctx context.Context, m awssqstypes.Message) {
 	c.hook.Received()
 	body := aws.ToString(m.Body)
 	messageID := aws.ToString(m.MessageId)
+
+	// Resume the producer's trace BEFORE opening the handle span: Extract
+	// installs the remote span as the parent in ctx, so SpanConsumerHandle
+	// becomes a child of the originating HTTP request rather than the root of
+	// a disconnected trace. A missing attribute leaves ctx untouched.
+	if tp := traceParentOf(m); tp != "" && c.tracer != nil {
+		ctx = c.tracer.Extract(ctx, tp)
+	}
 
 	ctx, span := c.hook.StartSpan(ctx, SpanConsumerHandle, Attr(AttrQueue, c.cfg.SQSRequestQueue))
 	defer span.End()
@@ -294,6 +310,20 @@ func (c *Consumer) fail(ctx context.Context, m awssqstypes.Message, cause error)
 func isPoison(err error) bool {
 	var p *poison
 	return errors.As(err, &p)
+}
+
+// traceParentOf reads the traceparent message attribute the publisher attaches
+// (see sqs.TraceParentAttribute). The attribute is only present because the
+// receive call requests it via MessageAttributeNames — custom attributes are
+// not returned by default, unlike the body. An absent attribute — an older
+// publisher, or a message injected by a test without one — yields "", which
+// the caller treats as "start a new trace".
+func traceParentOf(m awssqstypes.Message) string {
+	v, ok := m.MessageAttributes[sqsinfra.TraceParentAttribute]
+	if !ok || v.StringValue == nil {
+		return ""
+	}
+	return *v.StringValue
 }
 
 func sha256Hex(s string) string {

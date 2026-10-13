@@ -115,7 +115,7 @@ func routerSQS(t *testing.T) *awssqs.Client {
 
 func newRouterDeps(t *testing.T, mode config.Mode) (Deps, *routerIDP) {
 	t.Helper()
-	store := postgres.NewStore(endpointPool(t))
+	store := postgres.NewStore(endpointPool(t), nil)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	hook := silentHook{}
 	ws := service.NewWalletService(store, log, hook)

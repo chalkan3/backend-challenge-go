@@ -288,6 +288,33 @@ Três sinais, três donos — nenhum deles duplica o outro:
   então nenhum call site precisa de nil check. Um trace HTTP atravessa
   transporte → caso de uso → repositório, com os spans do banco emitidos
   pelo `pgx` tracer injetado uma única vez no pool.
+- **Continuidade do trace através da outbox.** A outbox quebra o trace em
+  dois *por construção*: a requisição HTTP commita a linha e retorna,
+  enquanto um relay destacado (`context.Background()`) publica depois.
+  Nenhum contexto em memória liga as duas metades — o relay não pode
+  reexecutar o que nunca viu. A ponte é **persistir o `traceparent` W3C**
+  (coluna `integration_outbox.trace_parent`, escrita **na mesma transação**
+  do saldo) e reabri-lo do outro lado:
+
+  | Salto | O que carrega o vínculo |
+  | --- | --- |
+  | HTTP → outbox | `Enqueue` injeta o span ativo no `ctx` (o span do HTTP) |
+  | outbox → relay | `ClaimBatch` devolve `trace_parent` **como dado** |
+  | relay → SQS | `Publisher` o anexa como *message attribute* (metadado de transporte, não payload) |
+  | SQS → consumer | `ReceiveMessage` pede o atributo e `Extract` o instala como parent remoto |
+
+  O port `service.SpanCarrier` (implementado por `otel.Carrier` sobre
+  `propagation.TraceContext{}` **explícito**, não o global) mantém o
+  domínio e o `messaging` livres de imports do SDK — o formato é
+  responsabilidade de adapter. Um `traceparent` vazio ou malformado
+  **degrada para um trace novo**, nunca falha o trabalho: um produtor sem
+  contexto a montante é um estado normal.
+
+  > [!NOTE]
+  > O atributo SQS só chega ao consumer se `ReceiveMessage` pedir
+  > `MessageAttributeNames` explicitamente — atributos customizados não vêm
+  > por padrão, ao contrário do corpo. Essa omissão era um bug real,
+  > encontrado pelo teste e2e `TestConsumerResumesTraceFromMessageAttribute`.
 - O **Collector** é o único ponto de ingestão: a aplicação nunca sabe qual
   backend armazena os traces. Trocar Tempo por Jaeger é mudar um YAML.
   Ele também **deriva** métricas dos spans (`spanmetrics`, `servicegraph`),

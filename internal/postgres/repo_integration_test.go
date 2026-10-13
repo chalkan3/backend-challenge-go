@@ -58,7 +58,7 @@ func mustPool(t *testing.T) *pgxpool.Pool {
 // newStore returns the real pgx Store (TxManager) bound to a live pool.
 func newStore(t *testing.T) *Store {
 	t.Helper()
-	return NewStore(mustPool(t))
+	return NewStore(mustPool(t), nil)
 }
 
 func money(t *testing.T, major, currency string) domain.Money {

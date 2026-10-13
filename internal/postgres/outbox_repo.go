@@ -11,11 +11,22 @@ import (
 	"github.com/chalkan3/backend-challenge-go/internal/service"
 )
 
-type outboxRepo struct{ ex querier }
+type outboxRepo struct {
+	ex      querier
+	carrier service.SpanCarrier
+}
 
 func (r *outboxRepo) Enqueue(ctx context.Context, envelopes []domain.Envelope) error {
 	if len(envelopes) == 0 {
 		return nil
+	}
+	// Capture the trace context BEFORE the batch: the same value applies to
+	// every event committed by this transaction (they share one request), and
+	// reading it once keeps Inject out of the loop. A nil carrier (unit tests,
+	// wiring without tracing) simply yields "", which the column accepts.
+	traceParent := ""
+	if r.carrier != nil {
+		traceParent = r.carrier.Inject(ctx)
 	}
 	batch := &pgx.Batch{}
 	for _, e := range envelopes {
@@ -30,10 +41,10 @@ func (r *outboxRepo) Enqueue(ctx context.Context, envelopes []domain.Envelope) e
 		batch.Queue(`
 			INSERT INTO integration_outbox
 				(event_id, aggregate_type, aggregate_id, event_type, event_version,
-				 correlation_id, payload, available_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb, now())`,
+				 correlation_id, trace_parent, payload, available_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb, now())`,
 			e.EventID, e.AggregateType, aggID, e.EventType, e.Version,
-			e.CorrelationID, string(payload))
+			e.CorrelationID, traceParent, string(payload))
 	}
 	return r.ex.SendBatch(ctx, batch).Close()
 }
@@ -51,7 +62,7 @@ func (r *outboxRepo) ClaimBatch(ctx context.Context, now time.Time, lease time.D
 			LIMIT $3
 			FOR UPDATE SKIP LOCKED
 		)
-		RETURNING event_id, aggregate_id, event_type, attempts, payload::text`,
+		RETURNING event_id, aggregate_id, event_type, attempts, payload::text, trace_parent`,
 		now, lease, limit)
 	if err != nil {
 		return nil, err
@@ -61,7 +72,7 @@ func (r *outboxRepo) ClaimBatch(ctx context.Context, now time.Time, lease time.D
 	for rows.Next() {
 		var it service.OutboxItem
 		var aggID uuid.UUID
-		if err := rows.Scan(&it.EventID, &aggID, &it.EventType, &it.Attempts, &it.Payload); err != nil {
+		if err := rows.Scan(&it.EventID, &aggID, &it.EventType, &it.Attempts, &it.Payload, &it.TraceParent); err != nil {
 			return nil, err
 		}
 		it.AggregateID = aggID.String()

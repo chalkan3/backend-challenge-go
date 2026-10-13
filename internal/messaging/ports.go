@@ -27,6 +27,18 @@ type ConsumerMetrics interface {
 	StartSpan(ctx context.Context, name string, attrs ...SpanAttr) (context.Context, Span)
 }
 
+// TraceExtractor restores the trace context a producer forwarded with the
+// message, so the consumer's span continues the originating trace instead of
+// starting an unrelated one. It is the read half of service.SpanCarrier: the
+// producer side (Inject) is only needed by the SQL adapter, so the consumer
+// deliberately depends on the smaller interface.
+type TraceExtractor interface {
+	// Extract returns a context whose active span is the remote parent
+	// described by carrier. An empty or malformed carrier yields ctx
+	// unchanged (a new trace, never a failure).
+	Extract(ctx context.Context, carrier string) context.Context
+}
+
 // SpanAttr is one attribute on a span. Each package speaks its own tiny
 // vocabulary so neither imports the tracing SDK; the adapter translates.
 type SpanAttr struct {

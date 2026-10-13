@@ -47,6 +47,10 @@ type recordingMetrics struct {
 	dlq        []string
 	retries    int
 	invalid    []string
+	// handleSpanCtx is the context the consumer passed to StartSpan for the
+	// handle span. Capturing it lets a test assert that the trace was resumed
+	// from the message attribute before the span was opened.
+	handleSpanCtx context.Context
 }
 
 func (m *recordingMetrics) Received() {
@@ -75,6 +79,9 @@ func (m *recordingMetrics) Invalid(reason string) {
 	m.invalid = append(m.invalid, reason)
 }
 func (m *recordingMetrics) StartSpan(ctx context.Context, _ string, _ ...messaging.SpanAttr) (context.Context, messaging.Span) {
+	m.mu.Lock()
+	m.handleSpanCtx = ctx
+	m.mu.Unlock()
 	return ctx, noopSpan{}
 }
 
@@ -187,7 +194,7 @@ func newConsumerHarness(t *testing.T) *consumerHarness {
 
 	hook := &recordingMetrics{}
 	urls := sqsinfra.QueueURLs{Request: rootURL, DLQ: dlqURL, Events: rootURL}
-	cons := messaging.NewConsumer(client, urls, cfg, store, svc, hook, testLogger)
+	cons := messaging.NewConsumer(client, urls, cfg, store, svc, hook, nil, testLogger)
 
 	return &consumerHarness{
 		client: client, urls: urls, cfg: cfg, store: store,
@@ -501,7 +508,7 @@ func TestConsumerShutdownGraceElapsed(t *testing.T) {
 	svc := service.NewWagerService(slowTx{}, testLogger, &silentInstrumentation{})
 	hook := &recordingMetrics{}
 	urls := sqsinfra.QueueURLs{Request: rootURL, DLQ: dlqURL, Events: rootURL}
-	cons := messaging.NewConsumer(client, urls, cfg, slowTx{}, svc, hook, testLogger)
+	cons := messaging.NewConsumer(client, urls, cfg, slowTx{}, svc, hook, nil, testLogger)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -551,7 +558,7 @@ func TestConsumerTransientFailureIsRetried(t *testing.T) {
 	svc := service.NewWagerService(failing, testLogger, &silentInstrumentation{})
 	hook := &recordingMetrics{}
 	urls := sqsinfra.QueueURLs{Request: rootURL, DLQ: dlqURL, Events: rootURL}
-	cons := messaging.NewConsumer(client, urls, cfg, failing, svc, hook, testLogger)
+	cons := messaging.NewConsumer(client, urls, cfg, failing, svc, hook, nil, testLogger)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -599,7 +606,7 @@ func TestConsumerRetriesExhaustedIsDLQ(t *testing.T) {
 	svc := service.NewWagerService(failing, testLogger, &silentInstrumentation{})
 	hook := &recordingMetrics{}
 	urls := sqsinfra.QueueURLs{Request: rootURL, DLQ: dlqURL, Events: rootURL}
-	cons := messaging.NewConsumer(client, urls, cfg, failing, svc, hook, testLogger)
+	cons := messaging.NewConsumer(client, urls, cfg, failing, svc, hook, nil, testLogger)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -719,7 +726,7 @@ func TestConsumerReceiveFailureBacksOffThenStops(t *testing.T) {
 		DLQ:     "http://localhost:4566/000000000000/nope-dlq.fifo",
 	}
 	hook := &recordingMetrics{}
-	cons := messaging.NewConsumer(client, urls, cfg, store, svc, hook, testLogger)
+	cons := messaging.NewConsumer(client, urls, cfg, store, svc, hook, nil, testLogger)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)

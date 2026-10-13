@@ -242,7 +242,7 @@ func TestOutboxEventIdStableOnReplay(t *testing.T) {
 // durably marked published.
 func TestOutboxRecoversWorkAbandonedByCrashedPublisher(t *testing.T) {
 	ctx := context.Background()
-	store := postgres.NewStore(mustDB(t))
+	store := postgres.NewStore(mustDB(t), nil)
 
 	eventID := uuid.NewString()
 	env := domain.Envelope{
