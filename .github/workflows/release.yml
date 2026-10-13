@@ -79,9 +79,25 @@ jobs:
         uses: goreleaser/goreleaser-action@v6
         with:
           version: ${{ env.GORELEASER_VERSION }}
-          args: release --clean
+          # `--skip=validate` é de propósito: o `validate` do GoReleaser
+          # consulta a API do GitHub para checar se a tag já tem Release e
+          # falha se tiver. Com o release-please no fluxo, a Release SEMPRE
+          # existe antes deste job rodar — o release-please cria a Release e a
+          # tag no mesmo passo, e é essa Release que o existe para receber os
+          # binários. Sem o skip, o pipeline quebra exatamente no caminho
+          # feliz. O que sobra do validate (o config parseia) é coberto pelo
+          # passo `goreleaser check` acima, que roda antes de qualquer coisa.
+          args: release --clean --skip=validate
         env:
-          # The token creates the Release and uploads the artifacts to it.
+          # Ver release-please.yml: com `--skip=validate`, o GoReleaser ANEXA
+          # os artefatos a uma Release que já existe (a do release-please) e
+          # não tenta criá-la. Os dois publicam a mesma Release, cada um com a
+          # sua parte: o release-please escreve o changelog a partir dos
+          # commits, o GoReleaser sobe binários, checksums e SBOMs.
+          #
+          # Sem `--skip=validate` isto falharia com "release already exists" —
+          # e falharia só no fluxo automatizado, nunca num dispatch manual com
+          # tag nova, que é o caminho em que isto foi testado antes.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # ── Image: the runtime artifact, for both architectures ────────────────────

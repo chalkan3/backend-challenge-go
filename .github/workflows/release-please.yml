@@ -1,0 +1,81 @@
+name: Release Please
+
+# Mantém um PR de release aberto a partir dos Conventional Commits no `main`.
+#
+# O que este workflow faz, e — mais importante — o que ele NÃO faz:
+#
+#   ✔ Lê os commits desde a última tag e decide o bump (feat → minor,
+#     fix → patch, `!`/BREAKING CHANGE → major).
+#   ✔ Abre/atualiza um PR com o CHANGELOG.md gerado e o bump no
+#     .release-please-manifest.json.
+#   ✔ Quando esse PR é MERGEADO, cria a tag anotada (ex. v0.2.0) e a
+#     GitHub Release que serve de gatilho para o release.yml.
+#
+#   ✘ NÃO sobe binário, checksum nem SBOM. Isso é do release.yml/GoReleaser.
+#   ✘ NÃO decide a versão sozinho: o PR é a revisão humana. A versão proposta
+#     aparece no diff antes de existir qualquer tag.
+#
+# A separação é deliberada e vale dizer por que: tag é a única coisa do
+# processo que é imutável e assinável. Um CI que infere a versão e publica sem
+# revisão transforma um erro de inferência em um artefato publicado que não dá
+# para desfazer honestamente — só dá para publicar uma versão seguinte que não
+# era a pretendida. O PR é onde o erro barato acontece.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write       # criar a tag e a Release
+  pull-requests: write  # abrir/atualizar o PR de release
+
+concurrency:
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: release-please (PR de release · tag · release)
+    runs-on: ubuntu-latest
+    steps:
+      # Por que um GitHub App e não o GITHUB_TOKEN padrão:
+      #
+      # Um push de tag feito com o GITHUB_TOKEN do Actions NÃO dispara outros
+      # workflows — é o anti-loop do GitHub. O release.yml escuta exatamente
+      # `push: tags: ["v*.*.*"]`, então com o token padrão ele seria pulado em
+      # silêncio: a tag apareceria, a Release também (criada pelo próprio
+      # release-please), e nenhum binário seria publicado. Uma falha que não
+      # falha, que é a pior categoria.
+      #
+      # Um token de App dispara os workflows normalmente. As duas variáveis
+      # abaixo são os secret NOMES de um App com permissão de Contents e
+      # Pull requests (write). Se o secret não existir, o passo cai para o
+      # GITHUB_TOKEN e emite um aviso alto — ver o passo seguinte.
+      - name: Escolher o token (App se configurado, senão GITHUB_TOKEN)
+        id: token
+        env:
+          APP_ID: ${{ secrets.RELEASE_PLEASE_APP_ID }}
+          APP_KEY: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+        run: |
+          if [ -n "${APP_ID}" ] && [ -n "${APP_KEY}" ]; then
+            echo "using=app" >> "$GITHUB_OUTPUT"
+            echo "A GitHub App is configured: the tag it pushes will trigger release.yml."
+          else
+            echo "using=fallback" >> "$GITHUB_OUTPUT"
+            echo "::warning::RELEASE_PLEASE_APP_ID/PRIVATE_KEY are not set, so this falls back to GITHUB_TOKEN. The tag WILL be created, but the tag push will NOT trigger release.yml — no binaries will be published until a GitHub App token is configured. See docs/en/operations/release-process.md."
+          fi
+
+      - name: Gerar token do App
+        id: app-token
+        if: steps.token.outputs.using == 'app'
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.RELEASE_PLEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+
+      - name: release-please
+        uses: googleapis/release-please-action@v4
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+          token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
