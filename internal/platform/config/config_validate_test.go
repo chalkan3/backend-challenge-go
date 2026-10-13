@@ -122,3 +122,29 @@ func TestHostnameOrDefault(t *testing.T) {
 	got := hostnameOr("unknown")
 	assert.NotEmpty(t, got)
 }
+
+// TestJWKSURL pins both shapes of the JWKS address: an explicit override wins
+// verbatim (the compose case, where the issuer host differs from the one the
+// validator can reach) and otherwise it is derived from the issuer, with a
+// trailing slash tolerated so "…/realms/wallet/" does not produce a double
+// slash that the IdP would 404.
+func TestJWKSURL(t *testing.T) {
+	t.Run("explicit override wins", func(t *testing.T) {
+		cfg := &Config{
+			AuthIssuer:  "http://idp:8080/realms/wallet",
+			AuthJWKSURL: "http://localhost:8080/realms/wallet/protocol/openid-connect/certs",
+		}
+		assert.Equal(t, "http://localhost:8080/realms/wallet/protocol/openid-connect/certs", cfg.JWKSURL())
+	})
+
+	t.Run("derived from the issuer", func(t *testing.T) {
+		cfg := &Config{AuthIssuer: "http://idp:8080/realms/wallet"}
+		assert.Equal(t, "http://idp:8080/realms/wallet/protocol/openid-connect/certs", cfg.JWKSURL())
+	})
+
+	t.Run("a trailing slash on the issuer is tolerated", func(t *testing.T) {
+		cfg := &Config{AuthIssuer: "http://idp:8080/realms/wallet/"}
+		assert.Equal(t, "http://idp:8080/realms/wallet/protocol/openid-connect/certs", cfg.JWKSURL(),
+			"the derivation must not emit a double slash")
+	})
+}

@@ -92,6 +92,13 @@ func TestDomainErrorIdentity(t *testing.T) {
 	t.Run("wrapped domain errors keep their code", func(t *testing.T) {
 		assert.Equal(t, "CURRENCY_MISMATCH", domain.FailureCode(domain.ErrCurrencyMismatch.With("a vs b")))
 	})
+	t.Run("a bare code has no colon suffix", func(t *testing.T) {
+		// A code-only error is what a machine reads (HTTP body, failureCode);
+		// the rendered message must be exactly the code, without a dangling
+		// ": " that a log-parser would treat as a detail.
+		bare := &domain.Error{Code: "WALLET_NOT_FOUND"}
+		assert.Equal(t, "WALLET_NOT_FOUND", bare.Error())
+	})
 }
 
 func TestParseID(t *testing.T) {

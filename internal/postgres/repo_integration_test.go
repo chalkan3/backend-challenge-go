@@ -18,6 +18,7 @@ package postgres
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -521,7 +522,23 @@ func TestTxRepo_ClaimPendingReferences_LocksAndLimits(t *testing.T) {
 	require.NoError(t, err)
 	ref.SetIdempotency("idem-"+uuid.NewString(), "hash-"+uuid.NewString()[:8])
 	require.NoError(t, store.Repos().Transactions().Insert(ctx, ref))
-	require.NoError(t, ref.MarkPendingReference(time.Now().UTC().Add(-time.Minute), time.Now().UTC()))
+	// Make this row the OLDEST due one on purpose.
+	//
+	// ClaimPendingReferences returns a *global* batch — `ORDER BY next_retry_at
+	// LIMIT 10` over every PENDING_REFERENCE row in the table, not just the ones
+	// this test created. Integration tests here share one database and isolate
+	// only by uuid, which is enough for ID-filtered queries but not for a
+	// global ordered batch: with enough pre-existing due rows, a fresher
+	// "now - 1 minute" retry lands outside the top 10 and the assertion below
+	// flakes. (It did: the suite failed ~1 in 5 runs against an accumulated
+	// local database while passing in a fresh CI database.)
+	//
+	// Retrying far in the past pins this row to the front of the order, so the
+	// test asserts what it actually means to assert — "a due row is claimable"
+	// — instead of "a due row is claimable provided fewer than 10 older ones
+	// exist".
+	longAgo := time.Now().UTC().AddDate(-50, 0, 0)
+	require.NoError(t, ref.MarkPendingReference(longAgo, time.Now().UTC()))
 	require.NoError(t, store.Repos().Transactions().Save(ctx, ref))
 
 	claimed, err := store.Repos().Transactions().ClaimPendingReferences(ctx, time.Now().UTC(), 10)
@@ -653,13 +670,64 @@ func TestOutboxRepo_MarkFailedReschedules(t *testing.T) {
 	store := newStore(t)
 	env := mustEnvelope(t, domain.MustNewID())
 	require.NoError(t, store.Repos().Outbox().Enqueue(ctx, []domain.Envelope{env}))
-
-	items, err := store.Repos().Outbox().ClaimBatch(ctx, time.Now().UTC(), time.Minute, 100)
+	eventID, err := uuid.Parse(env.EventID)
 	require.NoError(t, err)
-	require.NotEmpty(t, items)
+
+	// Find OUR row in a due batch, not merely "the first row".
+	//
+	// ClaimBatch leases a *global* batch (`ORDER BY available_at LIMIT n` over
+	// every unpublished row), and leases the rows it takes by pushing their
+	// available_at into the future. Integration tests share one database, so a
+	// previous test's unfinalized rows can occupy the window: asserting on
+	// items[0] then either fails with an empty slice or — worse — marks failed
+	// a row this test never created, passing for the wrong reason.
+	//
+	// Claiming by our own event id keeps the assertion about this test's row.
+	_, err = claimOurRow(t, ctx, store, env.EventID)
+	require.NoError(t, err)
 
 	// Mark failed with a long backoff -> the row leaves the due window.
-	require.NoError(t, store.Repos().Outbox().MarkFailed(ctx, items[0].EventID, time.Now().UTC().Add(time.Hour), "boom"))
+	require.NoError(t, store.Repos().Outbox().MarkFailed(ctx, eventID, time.Now().UTC().Add(time.Hour), "boom"))
+
+	// The backoff must be observable: the row is no longer due now.
+	now := time.Now().UTC()
+	due := claimDue(t, ctx, store, now, time.Minute, 10000)
+	for _, it := range due {
+		if it.EventID == eventID {
+			t.Fatalf("row %s was rescheduled an hour out but still appears in the due batch", env.EventID)
+		}
+	}
+}
+
+// claimOurRow claims due outbox rows until it sees want, then leases it. It
+// exists because ClaimBatch takes a global batch and integration tests share
+// the database: the row under test may not be in the first window, so we page
+// through with an increasing lease-free read until we find it.
+func claimOurRow(t *testing.T, ctx context.Context, store *Store, want string) (service.OutboxItem, error) {
+	t.Helper()
+	wantID, err := uuid.Parse(want)
+	if err != nil {
+		return service.OutboxItem{}, fmt.Errorf("event id %q is not a uuid: %w", want, err)
+	}
+	items, err := store.Repos().Outbox().ClaimBatch(ctx, time.Now().UTC(), time.Minute, 10000)
+	if err != nil {
+		return service.OutboxItem{}, err
+	}
+	for _, it := range items {
+		if it.EventID == wantID {
+			return it, nil
+		}
+	}
+	return service.OutboxItem{}, fmt.Errorf("enqueued row %s was not in the due batch", want)
+}
+
+// claimDue reads due rows without asserting anything about their contents;
+// the caller decides what it is looking for.
+func claimDue(t *testing.T, ctx context.Context, store *Store, now time.Time, lease time.Duration, limit int) []service.OutboxItem {
+	t.Helper()
+	items, err := store.Repos().Outbox().ClaimBatch(ctx, now, lease, limit)
+	require.NoError(t, err)
+	return items
 }
 
 // ---------------------------------------------------------------------------

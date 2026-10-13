@@ -2,6 +2,7 @@ package otel
 
 import (
 	"context"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -231,4 +232,52 @@ func TestFailureStatusesMatchDomainStatuses(t *testing.T) {
 	assert.True(t, isFailureStatus(StatusFailed))
 	assert.False(t, isFailureStatus(string(domain.StatusProcessed)))
 	assert.False(t, isFailureStatus(string(domain.StatusPending)))
+}
+
+// TestTelemetryReportsEffectiveConfig pins that the provider hands back the
+// configuration it was actually built with — the startup log line describes
+// what is running, not what was requested, so a typo in the effective config
+// must be visible. The nil provider returns a zero Config instead of
+// panicking, because registration runs unconditionally.
+func TestTelemetryReportsEffectiveConfig(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{Enabled: true, Endpoint: "collector:4317", ServiceName: "wallet", InstanceID: "wallet-1"}
+	p, err := New(t.Context(), Config{Enabled: false})
+	require.NoError(t, err)
+	assert.Equal(t, Config{Enabled: false}, p.Telemetry(),
+		"an effective config is reported verbatim")
+
+	// A zero provider (nil) must not dereference.
+	var nilP *Provider
+	assert.Equal(t, Config{}, nilP.Telemetry())
+
+	// And a real enabled provider reports exactly what it was given.
+	enabled, err := New(t.Context(), cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = enabled.Shutdown(context.Background()) })
+	assert.Equal(t, cfg, enabled.Telemetry())
+}
+
+// TestLogAttrsExposeTelemetryIdentity pins the shape of the startup log line's
+// fields. They are consumed by operators and by log-based alerting, so the
+// keys (and their order) are part of the contract, not an implementation
+// detail.
+func TestLogAttrsExposeTelemetryIdentity(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{
+		Enabled: true, Endpoint: "collector:4317",
+		ServiceName: "wallet", InstanceID: "wallet-7", SampleRatio: 0.25,
+	}
+	attrs := cfg.LogAttrs()
+	require.Len(t, attrs, 5)
+
+	keys := make([]string, 0, len(attrs))
+	for _, a := range attrs {
+		kv, ok := a.(slog.Attr)
+		require.True(t, ok, "every attribute must be a slog.Attr")
+		keys = append(keys, kv.Key)
+	}
+	assert.Equal(t, []string{"enabled", "endpoint", "service", "instance", "sampleRatio"}, keys)
 }

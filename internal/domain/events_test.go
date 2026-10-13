@@ -87,3 +87,29 @@ func TestEnvelopeMarshalRoundTrip(t *testing.T) {
 	assert.Equal(t, e.AggregateID, got.AggregateID)
 	assert.Equal(t, e.Version, got.Version)
 }
+
+// TestWagerTransactionRejectedEvent covers the audit event for a business
+// rejection. A rejection is a legitimate outcome the provider must be able to
+// reconcile, so the event has to carry the stable failure code and message —
+// dropping either would leave the caller with a silent, unexplained refusal.
+func TestWagerTransactionRejectedEvent(t *testing.T) {
+	tx := externalTx(t, func(p *domain.ExternalTxParams) {
+		p.Money = mustParse(t, "10.00", "BRL")
+	})
+	require.NoError(t, tx.MarkRejected("INSUFFICIENT_FUNDS", "balance too low", baseTime))
+
+	e, err := domain.NewWagerTransactionRejectedEvent(tx)
+	require.NoError(t, err)
+
+	assert.Equal(t, domain.EventWagerTransactionRejected, e.EventType)
+	assert.Equal(t, domain.AggregateWagerTransaction, e.AggregateType)
+	assert.Equal(t, tx.ID().String(), e.AggregateID)
+	assert.Equal(t, "corr-1", e.CorrelationID)
+	assert.NotEmpty(t, e.EventID)
+
+	b, err := json.Marshal(e)
+	require.NoError(t, err)
+	assert.Contains(t, string(b), `"failureCode":"INSUFFICIENT_FUNDS"`)
+	assert.Contains(t, string(b), "balance too low")
+	assert.NotContains(t, string(b), "amountMinor", "money travels as a decimal string, never minor units")
+}

@@ -7,7 +7,12 @@ package sqs_test
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -53,4 +58,38 @@ func TestNewClientBuildsAgainstAnyEndpoint(t *testing.T) {
 	client, err := sqs.NewClient(context.Background(), unreachableConfig(), slog.Default())
 	require.NoError(t, err)
 	assert.NotNil(t, client)
+}
+
+// ── Happy path against an SQS-speaking stub ─────────────────────────────────
+
+// TestResolveQueueURLsHappyPath completes the pair with the fail-fast test
+// above: when the broker answers, every configured name must be resolved to
+// the URL the broker returned — not to a hard-coded guess, and not skipped.
+func TestResolveQueueURLsHappyPath(t *testing.T) {
+	var got []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		var payload struct {
+			QueueName string `json:"QueueName"`
+		}
+		_ = json.Unmarshal(raw, &payload)
+		got = append(got, payload.QueueName)
+		w.Header().Set("Content-Type", "application/x-amz-json-1.0")
+		fmt.Fprintf(w, `{"QueueUrl":"http://broker/%s"}`, payload.QueueName)
+	}))
+	defer srv.Close()
+
+	cfg := unreachableConfig()
+	cfg.SQSEndpoint = srv.URL
+	client, err := sqs.NewClient(context.Background(), cfg, slog.Default())
+	require.NoError(t, err)
+
+	urls, err := sqs.ResolveQueueURLs(context.Background(), client, cfg)
+	require.NoError(t, err)
+
+	assert.Equal(t, "http://broker/wager-requests.fifo", urls.Request)
+	assert.Equal(t, "http://broker/integration-events.fifo", urls.Events)
+	assert.Equal(t, "http://broker/wager-dlq.fifo", urls.DLQ)
+	assert.Equal(t, []string{"wager-requests.fifo", "integration-events.fifo", "wager-dlq.fifo"}, got,
+		"each configured queue must be resolved exactly once, in order")
 }

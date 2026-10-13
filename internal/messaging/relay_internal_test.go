@@ -6,7 +6,13 @@ package messaging
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/json"
+	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -280,4 +286,72 @@ func (claimFailTxs) ExistsProcessedReversal(context.Context, uuid.UUID, domain.T
 }
 func (claimFailTxs) ClaimPendingReferences(context.Context, time.Time, int) ([]*domain.WagerTransaction, error) {
 	return nil, assert.AnError
+}
+
+// TestSpanAttrAccessors pins the structural pair the tracing adapter reads.
+// Key and Val are exported fields, but the adapter goes through these
+// accessors so the vocabulary stays decoupled from the OTel SDK; a regression
+// that stopped returning the stored value would silently drop every span
+// attribute.
+func TestSpanAttrAccessors(t *testing.T) {
+	a := Attr("wallet.id", "abc-123")
+	assert.Equal(t, "wallet.id", a.AttrKey())
+	assert.Equal(t, "abc-123", a.AttrVal())
+
+	b := Attr("balance.minor", int64(5000))
+	assert.Equal(t, "balance.minor", b.AttrKey())
+	assert.Equal(t, int64(5000), b.AttrVal())
+}
+
+// TestTickMarkFailedErrorIsLoggedNotFatal covers the bookkeeping failure: the
+// publish failed AND recording the retry failed. The event is still leased and
+// will be reclaimed when the lease expires, so the tick must log and continue,
+// not crash the worker or skip the remaining items.
+func TestTickMarkFailedErrorIsLoggedNotFatal(t *testing.T) {
+	id := uuid.New()
+	f := &outboxFake{
+		items: []service.OutboxItem{{
+			EventID: id, AggregateID: "wallet-1", EventType: "WalletBalanceChanged", Payload: []byte(`{}`),
+		}},
+		markFailErr: assert.AnError,
+	}
+	hook := &relayHook{}
+	w := newWorker(f, publisherToLocalStack(t, "http://127.0.0.1:1"), hook)
+
+	assert.NotPanics(t, func() { w.tick(context.Background()) })
+	assert.Empty(t, f.markedFailed, "the bookkeeping write was refused")
+	assert.Equal(t, 1, hook.failed, "the failure is still counted, so the alert sees it")
+}
+
+// TestTickMarkPublishedErrorDoesNotLoseTheEvent: a publish that succeeded but
+// whose "published" write failed must still be counted as published. The event
+// will be re-claimed and republished, and SQS deduplication (eventId) absorbs
+// that — so the tick must not treat it as a failure.
+func TestTickMarkPublishedErrorDoesNotLoseTheEvent(t *testing.T) {
+	id := uuid.New()
+	f := &outboxFake{
+		items: []service.OutboxItem{{
+			EventID: id, AggregateID: "wallet-1", EventType: "WalletBalanceChanged", Payload: []byte(`{}`),
+		}},
+		markPubErr: assert.AnError,
+	}
+	hook := &relayHook{}
+	// A broker stub that accepts the publish, so the success path is reached.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var payload struct {
+			MessageBody string `json:"MessageBody"`
+		}
+		_ = json.Unmarshal(body, &payload)
+		sum := md5.Sum([]byte(payload.MessageBody))
+		w.Header().Set("Content-Type", "application/x-amz-json-1.0")
+		fmt.Fprintf(w, `{"MessageId":"m","MD5OfMessageBody":"%x"}`, sum)
+	}))
+	defer srv.Close()
+
+	w := newWorker(f, publisherToLocalStack(t, srv.URL), hook)
+	w.tick(context.Background())
+
+	assert.Equal(t, 1, hook.published, "a successful publish counts even if the marker write failed")
+	assert.Empty(t, f.markedPublished)
 }

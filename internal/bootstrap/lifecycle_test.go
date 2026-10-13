@@ -8,8 +8,10 @@ package bootstrap
 import (
 	"context"
 	"log/slog"
+	"net"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -100,4 +102,44 @@ func TestRegisterHTTPRegistersHook(t *testing.T) {
 // opening a socket.
 func minimalServer() *http.Server {
 	return &http.Server{Addr: "127.0.0.1:0"}
+}
+
+// TestRegisterHTTPStartListenAndServe drives OnStart for real: the hook must
+// bind the address, serve in the background and return nil, then OnStop must
+// drain and close the listener. This is the boot path of every HTTP replica;
+// left untested, a hook that forgot to call Listen or Serve would leave the
+// process "healthy" while accepting no connections.
+func TestRegisterHTTPStartListenAndServe(t *testing.T) {
+	lc := &capturingLifecycle{}
+	// Addr 127.0.0.1:0 lets the kernel pick a free port, so the test never
+	// races another process for a fixed one.
+	srv := &http.Server{Addr: "127.0.0.1:0", Handler: http.NewServeMux()}
+
+	registerHTTP(lc, &config.Config{ShutdownGrace: time.Second}, slog.Default(), srv)
+	require.Len(t, lc.hooks, 1)
+
+	require.NoError(t, lc.hooks[0].OnStart(context.Background()),
+		"binding a valid address must succeed")
+
+	// Shutdown is the positive confirmation that a listener actually exists:
+	// it only returns nil for a running server.
+	stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	require.NoError(t, lc.hooks[0].OnStop(stopCtx))
+}
+
+// TestRegisterHTTPStartFailsOnBusyPort pins the failure branch: a port already
+// in use must surface as an error from OnStart, so Fx aborts startup instead
+// of running a replica that never listens.
+func TestRegisterHTTPStartFailsOnBusyPort(t *testing.T) {
+	busy, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer busy.Close()
+
+	lc := &capturingLifecycle{}
+	srv := &http.Server{Addr: busy.Addr().String()}
+	registerHTTP(lc, &config.Config{ShutdownGrace: time.Second}, slog.Default(), srv)
+
+	require.Error(t, lc.hooks[0].OnStart(context.Background()),
+		"a busy port must fail startup, not be ignored")
 }

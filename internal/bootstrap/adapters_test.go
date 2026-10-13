@@ -77,6 +77,7 @@ func TestMessagingAdapterForwardsToBackends(t *testing.T) {
 		ad.OutboxPublished()
 		ad.OutboxFailed()
 		ad.OutboxStats(7, 1.5)
+		ad.ReconciliationSweep(12)
 		ad.Received()
 		ad.Retry()
 		ad.DLQ("terminal")

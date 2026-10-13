@@ -123,3 +123,15 @@ func TestValidateCapturesScopeButDoesNotGateOnIt(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, pn.Scopes, "absent scope claim yields nil, not [\"\"]")
 }
+
+// TestSplitScopes pins the scope claim parsing: a blank claim yields nil (not
+// a slice holding the empty string, which would make an emptiness check lie),
+// and extra whitespace is normalised away so a sloppy IdP does not break
+// scope-based authorization.
+func TestSplitScopes(t *testing.T) {
+	assert.Nil(t, splitScopes(""), "a blank scope claim must be nil, not [\"\"]")
+	assert.Nil(t, splitScopes("   "), "whitespace-only is still empty")
+	assert.Equal(t, []string{"wallet:read", "wallet:write"}, splitScopes("wallet:read wallet:write"))
+	assert.Equal(t, []string{"wallet:read", "wallet:write"}, splitScopes("  wallet:read   wallet:write  "),
+		"surrounding and repeated whitespace must not produce empty entries")
+}
