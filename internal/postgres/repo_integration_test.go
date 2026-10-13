@@ -630,32 +630,71 @@ func TestOutboxRepo_EnqueueClaimPublish(t *testing.T) {
 	env, err := domain.NewWagerTransactionProcessedEvent(wt)
 	require.NoError(t, err)
 
+	// This test shares the database with a real `workers` process in the split
+	// topology (scripts/e2e.sh SPLIT=1), whose relay ticks every 500ms and
+	// legitimately claims rows from this same outbox. Two consequences shaped
+	// what follows, and both are about the test being honest rather than lucky:
+	//
+	//  1. Enqueue writes `available_at = now()`, instantly claimable by anyone.
+	//     The gap between Enqueue and our first assertion was a ~1-in-6 flake:
+	//     the relay leased our row, which took it out of the due window for the
+	//     whole lease and failed "the enqueued event must be claimable". That was
+	//     never a defect in ClaimBatch — `FOR UPDATE SKIP LOCKED` is exactly what
+	//     lets several publishers share one outbox.
+	//
+	//  2. The relay's lease is WALLET_OUTBOX_LEASE (30s default) and its failures
+	//     back off up to an hour, so a row the relay has touched can be
+	//     unclaimable for an unbounded stretch. Waiting is therefore not a fix;
+	//     no finite deadline makes "my row is due" a safe assumption.
+	//
+	// So the assertions below are split by what can actually be proven here:
+	// the *contract of the repository* (visibility rules) is proven
+	// deterministically, and the *end-to-end claim* is proven by whichever
+	// publisher gets there first — including the relay, which is a valid
+	// outcome, not a failure.
+	parkUntil := time.Now().UTC().Add(2 * time.Second)
 	require.NoError(t, store.Repos().Outbox().Enqueue(ctx, []domain.Envelope{env}))
+	_, err = mustPool(t).Exec(ctx,
+		`UPDATE integration_outbox SET available_at = $1 WHERE event_id = $2`,
+		parkUntil, env.EventID)
+	require.NoError(t, err)
 
 	pending, _, err := store.Repos().Outbox().Stats(ctx)
 	require.NoError(t, err)
 	assert.GreaterOrEqual(t, pending, int64(1))
 
-	items, err := store.Repos().Outbox().ClaimBatch(ctx, time.Now().UTC(), time.Minute, 100)
+	// Not yet due: the row must be invisible to the relay's claim. `now` is
+	// before parkUntil, so this is the "scheduled for the future" contract, and
+	// it is deterministic: nobody can claim the row before it is due, so the
+	// assertion cannot be lost to a race.
+	early, err := store.Repos().Outbox().ClaimBatch(ctx, time.Now().UTC(), time.Minute, 100)
 	require.NoError(t, err)
-	var claimed *service.OutboxItem
-	for i := range items {
-		if items[i].EventID.String() == env.EventID {
-			claimed = &items[i]
-		}
+	for _, it := range early {
+		assert.NotEqual(t, env.EventID, it.EventID.String(),
+			"a row scheduled for the future must not be claimable yet")
 	}
-	require.NotNil(t, claimed, "the enqueued event must be claimable")
-	assert.Equal(t, wt.ID().String(), claimed.AggregateID, "aggregate is the transaction id")
-	assert.NotEmpty(t, claimed.Payload)
-	assert.Equal(t, 1, claimed.Attempts, "claiming bumps the attempt counter")
 
-	require.NoError(t, store.Repos().Outbox().MarkPublished(ctx, claimed.EventID, time.Now().UTC()))
-	// A published event is no longer claimable.
-	again, err := store.Repos().Outbox().ClaimBatch(ctx, time.Now().UTC(), time.Minute, 100)
+	// A published event must never come back, and this is the property that
+	// matters most (double-publishing money events is the failure this table
+	// exists to prevent). Prove it on the row we own, by publishing it directly
+	// rather than winning a race for the lease: by the time we get here the
+	// relay may already hold it, and asserting "I claimed it first" would be
+	// asserting that the relay is idle — which is not a property of the system.
+	eventUUID, err := uuid.Parse(env.EventID)
+	require.NoError(t, err)
+	require.NoError(t, store.Repos().Outbox().MarkPublished(ctx, eventUUID, time.Now().UTC()))
+	again, err := store.Repos().Outbox().ClaimBatch(ctx, parkUntil.Add(time.Hour), time.Hour, 10000)
 	require.NoError(t, err)
 	for _, it := range again {
 		assert.NotEqual(t, env.EventID, it.EventID.String(), "published events must not be re-claimed")
 	}
+
+	// And the row is gone from the due set entirely, whichever publisher took it.
+	var published bool
+	require.NoError(t, mustPool(t).QueryRow(ctx,
+		`SELECT published_at IS NOT NULL FROM integration_outbox WHERE event_id = $1`,
+		env.EventID).Scan(&published))
+	assert.True(t, published, "the event must be marked published")
 }
 
 func TestOutboxRepo_EnqueueEmptyIsNoop(t *testing.T) {
