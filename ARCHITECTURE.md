@@ -274,11 +274,16 @@ com `WALLET_OTEL_ENABLED=true`.
 ## 11. Limitações e trabalho não concluído
 
 - Escala monetária fixa 2 (sem JPY/KWD); sem conversão de moeda.
-- Partidas dobradas no ledger (opcional) e teste de carga reprodutível não
-  implementados. Amostragem de traces é por razão fixa, sem tail sampling.
-- Emulação de falha "kill -9" está documentada via `docker compose kill`,
-  mas não há um harness automatizado dedicado para o cenário 5/6 do §13
-  (os demais cenários têm teste).
+- Partidas dobradas existem como **núcleo de domínio**
+  (`internal/domain/doubleentry.go`, com testes e prova por mutação), mas
+  **não estão plugadas ao ledger SQL**: não há tabela `postings`, nem gravação
+  da segunda perna junto de `finishProcessed`. Ligá-las é trabalho de schema +
+  wiring, não de modelagem.
+- O cenário 5 do §13 ("interromper o consumidor após o commit e antes do
+  delete") tem harness automatizado — `test/integration/kill_after_commit_test.go`,
+  determinístico via `commitGateTxManager` (sem depender de timing de
+  `docker kill`). O cenário 6 **não** tem teste dedicado; os demais cenários têm.
+- Amostragem de traces é por razão fixa, sem tail sampling.
 - O mapeamento `providerId ↔ cliente Keycloak` usa mappers hardcoded no
   realm de teste; em produção, grupos/roles do IdP.
 - Credenciais LocalStack (test/test) e secrets de realm são de ambiente

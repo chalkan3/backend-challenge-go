@@ -17,8 +17,9 @@ transactional outbox, inbox durável e controle de concorrência por carteira.
 
 [![CI](https://github.com/chalkan3/backend-challenge-go/actions/workflows/ci.yml/badge.svg)](https://github.com/chalkan3/backend-challenge-go/actions/workflows/ci.yml)
 [![Release](https://github.com/chalkan3/backend-challenge-go/actions/workflows/release.yml/badge.svg)](https://github.com/chalkan3/backend-challenge-go/actions/workflows/release.yml)
-[![Testes unitários](https://img.shields.io/badge/unit%20tests-71%20passing-2ea043)](#-testes)
-[![Testes e2e](https://img.shields.io/badge/e2e%20tests-25%20passing-2ea043)](#-testes)
+[![Testes unitários](https://img.shields.io/badge/unit%20tests-236%20passing-2ea043)](#-testes)
+[![Testes de integração](https://img.shields.io/badge/integration%20tests-124%20passing-2ea043)](#-testes)
+[![Cobertura](https://img.shields.io/badge/coverage-91%25-2ea043)](#-testes)
 [![Go Report Card](https://goreportcard.com/badge/github.com/chalkan3/backend-challenge-go)](https://goreportcard.com/report/github.com/chalkan3/backend-challenge-go)
 
 </div>
@@ -39,10 +40,12 @@ transactional outbox, inbox durável e controle de concorrência por carteira.
 - [Observabilidade](#-observabilidade)
 - [API](#-api)
 - [Testes](#-testes)
+  - [Testes de integração (containers reais)](#testes-de-integração-containers-reais--sem-mock-de-infra)
   - [Testes de carga (k6)](#testes-de-carga-k6)
 - [Integração contínua](#-integração-contínua)
 - [Simulações de falha](#-simulações-de-falha)
 - [Decisões técnicas](#-decisões-técnicas)
+  - [Partidas dobradas (diferencial opcional)](#partidas-dobradas-diferencial-opcional)
 
 ---
 
@@ -657,11 +660,15 @@ A identidade da mensagem é `sha256` do corpo. Eventos de saída são publicados
 ### Unitários
 
 ```sh
-go test ./...            # 71 testes (testify), table-driven
+go test ./...            # 236 testes (testify), table-driven
 go test -race ./...      # com detector de corrida
 go vet ./...             # + go vet -tags=integration ./...
 gofmt -l .               # vazio = formatado
 ```
+
+Cobertura combinada (unit + integração, com a stack no ar): **91,1%** —
+`1979/2172` statements, medidas com `-coverpkg=./cmd/...,./internal/...` sobre os
+dois conjuntos de pacotes. Os badges de teste acima saem destas duas contagens.
 
 ### ✅ Validação end-to-end (um comando)
 
@@ -687,14 +694,30 @@ docker compose up -d postgres keycloak localstack app   # dependências + app
 make test-integration                                   # go test -tags=integration ./test/integration/...
 ```
 
-Cobrem **29 testes**: migrations e constraints (ledger append-only, unicidades,
-CHECKs), atomicidade financeira, cenário obrigatório de concorrência (100.00 e
-duas apostas de 80.00, inclusive com **duas instâncias**), replays HTTP+SQS
-cruzados, **idempotência de abertura de carteira** (`Idempotency-Key`), 
+Cobrem **124 testes** distribuídos por `test/integration/`, `internal/postgres/`
+e `internal/transport/http/`: migrations e constraints (ledger append-only,
+unicidades, CHECKs), atomicidade financeira, cenário obrigatório de concorrência
+(100.00 e duas apostas de 80.00, inclusive com **duas instâncias**), replays
+HTTP+SQS cruzados, **idempotência de abertura de carteira** (`Idempotency-Key`),
 inbox/outbox, DLQ, resolução e expiração de referências (TTL), isolamento entre
 provedores, rejeição de credenciais, ciclo de vida Fx e **recuperação de falha
 de infraestrutura** (fail-fast de Postgres/SQS no boot e degradação honesta de
 `/health/ready` a `503` quando uma dependência cai em runtime).
+
+#### Interrupção do consumidor entre o commit e o ack
+
+O cenário 5 do enunciado — *"interrompa um consumidor depois do commit e antes da
+remoção da mensagem"* — é coberto por `kill_after_commit_test.go`. Ele não depende
+de `docker kill` nem de timing: um `commitGateTxManager` envolve o `Store` real e,
+após o **primeiro commit bem-sucedido**, bloqueia a transação até o teste cancelar
+o contexto. A instância #1 morre exatamente no ponto exigido (pós-commit,
+pré-`DeleteMessage`); a reentrega vai para uma instância #2 com store real, que
+precisa **reconhecer a duplicata pelo inbox durável**, ackar sem debitar de novo,
+não consumir uma segunda linha de inbox e não mandar a mensagem para a DLQ.
+
+A prova de que o teste morde o comportamento, e não a implementação: trocar
+`if tag.RowsAffected() == 1` por `if true` em `inbox_repo.go` (aceitar toda
+reentrega como nova) faz o teste falhar — o inbox deixaria de deduplicar.
 
 ### Testes de jornada (histórias executáveis)
 
@@ -825,6 +848,42 @@ UP_ONLY=1 make e2e && make load-smoke && make load-hot && make load-verify  # jo
 Detalhadas em [`ARCHITECTURE.md`](ARCHITECTURE.md) — dinheiro, transações,
 idempotência, locks, referências pendentes, reversões, inbox/outbox,
 autenticação, Fx e shutdown.
+
+### Partidas dobradas (diferencial opcional)
+
+O ledger existente é **unilateral**: por movimento, garante
+`balance_after = balance_before ± amount`, e a soma do ledger é conferida contra
+o saldo por `loadtest/sql/invariants.sql` (auditoria #4). O que ele *não* expressa
+é a segunda perna: **todo débito é crédito em algum lugar**, de modo que o
+sistema conserve valor como um todo.
+
+`internal/domain/doubleentry.go` adiciona essa segunda perna como **núcleo de
+domínio puro** (sem I/O, sem dependência de infraestrutura):
+
+| Conceito | Papel |
+| :-- | :-- |
+| `Account` | balde de valor identificado por `(kind, ref)` — `PLAYER_WALLET`, `HOUSE`, `PROVIDER_SETTLEMENT`, `REVENUE`; as duas últimas são *singleton* sem `ref` |
+| `Posting` | uma perna imutável: direction (`DEBIT`/`CREDIT`) + `Money` |
+| `JournalEntry` | as pernas de uma transação; **rejeita entrada desbalanceada** na construção e ordena as pernas por conta (forma canônica) |
+
+Cada movimento vira duas pernas — `BET` debita a carteira do jogador e credita a
+casa; `WIN` faz o inverso — e `PlayerDelta(walletID)` recupera a variação do
+jogador somando as pernas assinadas, que é a checagem de consistência
+correspondente ao lado SQL.
+
+> [!IMPORTANT]
+> **Estado:** este é um núcleo de domínio exercitado por testes (13 funções,
+> 95% de cobertura), **ainda não plugado ao ledger SQL**. A segunda perna é
+> computável a partir de qualquer transação, mas hoje não é persistida em uma
+> tabela `postings` nem gravada na mesma transação de `finishProcessed`; a
+> auditoria de invariantes cobre a cadeia unilateral. Está documentado assim —
+> em vez de omitido — porque a honestidade sobre o alcance de uma peça é parte
+> da entrega; ligá-la ao fluxo é trabalho de schema + wiring, não de modelagem.
+
+Também há dois testes que mudam de comportamento quando o invariante é violado —
+prova por mutação: forçar `Balanced()` a `return true` e trocar as pernas de
+`BET` (`player, house` → `player, player`) fazem a suíte falhar, o que mostra que
+os testes mordem a aritmética e não apenas a API.
 
 ---
 
