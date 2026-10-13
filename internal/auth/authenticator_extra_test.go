@@ -23,11 +23,13 @@ import (
 func TestValidateWithNoKeysLoadedIsRejected(t *testing.T) {
 	t.Parallel()
 	a := &Authenticator{
-		set:      jwk.NewSet(), // registered but never fetched
 		issuer:   "http://idp/realms/wallet",
 		audience: "",
 		log:      slog.New(slog.DiscardHandler),
 	}
+	// Store an empty set: registered but never fetched successfully.
+	empty := jwk.NewSet()
+	a.set.Store(&empty)
 
 	_, err := a.Validate("any.token.here")
 	require.ErrorIs(t, err, ErrInvalidToken)
@@ -62,11 +64,12 @@ func TestValidateEnforcesAudienceWhenConfigured(t *testing.T) {
 	idp := newTestIdP(t)
 	// Re-wire the authenticator with the same key set but an audience check.
 	withAud := &Authenticator{
-		set:      idp.auth.set,
 		issuer:   idp.auth.issuer,
 		audience: "wallet-api",
 		log:      slog.New(slog.DiscardHandler),
 	}
+	// Publish the same key set via the atomic accessor, not by copying it.
+	withAud.publish(*idp.auth.set.Load())
 
 	// Token WITHOUT the required audience → rejected.
 	noAud := idp.sign(t, providerClaims(), time.Now().Add(10*time.Minute))
@@ -77,11 +80,11 @@ func TestValidateEnforcesAudienceWhenConfigured(t *testing.T) {
 	claims := providerClaims()
 	claims["aud"] = "wallet-api"
 	withAud2 := &Authenticator{
-		set:      idp.auth.set,
 		issuer:   idp.auth.issuer,
 		audience: "wallet-api",
 		log:      slog.New(slog.DiscardHandler),
 	}
+	withAud2.publish(*idp.auth.set.Load())
 	ok := idp.sign(t, claims, time.Now().Add(10*time.Minute))
 	p, err := withAud2.Validate(ok)
 	require.NoError(t, err)

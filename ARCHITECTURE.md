@@ -216,9 +216,40 @@ arquitetura), table-driven e sem I/O.
 
 - **Keycloak** como IdP (recomendação do desafio), fluxo
   `client_credentials` service-to-service. O serviço nunca emite token nem
-  cadastra senha — valida via **JWKS** (`lestrrat-go/jwx`) com cache e
-  refresh automático; assinatura, `iss` e `exp` são obrigatórios (`aud`
-  opcional).
+  cadastra senha — valida via **JWKS** (`lestrrat-go/jwx`); assinatura, `iss` e
+  `exp` são obrigatórios (`aud` opcional).
+
+### Resiliência do JWKS: por que `jwk.Fetch` e não `jwk.Cache`
+
+A primeira versão usava `jwk.Cache` com um *warm-up* em goroutine. Um probe
+lado a lado — mesmo servidor JWKS, mesma janela de 3 s, contando acessos à rede
+— mostrou que os dois não se comportam igual quando o IdP está fora no boot:
+
+```
+jwk.Cache em loop :  1 acesso à rede em 3s   (a 1ª falha é cacheada)
+jwk.Fetch em loop :  2 acessos à rede em 3s  (retenta de verdade)
+```
+
+`jwk.Cache.Get` **cacheia o erro** da primeira busca e passa a responder
+`"cached object is not a Set"` sem tocar a rede durante toda a janela de
+refresh. Contra um IdP que sobe depois do serviço — justamente a degradação que
+este serviço deve sobreviver — o *warm-up* girava contra esse erro em cache e o
+key set **nunca carregava**; todo token era recusado para sempre. A própria doc
+do `jwx` recomenda não usar `jwk.Cache` para JWKS que podem estar indisponíveis.
+
+O carregador agora usa `jwk.Fetch` (que sempre vai à rede) num loop de retry com
+backoff, e guarda o key set atrás de um **`atomic.Pointer[jwk.Set]`**:
+
+- o refresher publica um set novo com um único `Store` atômico;
+- cada `Validate` faz um único `Load` — sem lock compartilhado;
+- a rotação é transparente (refresh periódico), e uma falha de refresh **mantém
+  o último set bom** em vez de trancar todos para fora.
+
+A troca também eliminou uma condição de corrida: o campo `set` era escrito pela
+goroutine de fundo e lido sem sincronização pelas goroutines de request — só
+disparava com o IdP fora no boot, invisível no caminho feliz. O
+`atomic.Pointer` fecha isso e há teste sob `-race`.
+
 - Modelo de permissões: a identidade **determina o `providerId`** — o claim
   `providerId` é injetado por mapper *hardcoded* em cada cliente provider
   (impossível forjar via request). `wallet-internal` carrega o claim
