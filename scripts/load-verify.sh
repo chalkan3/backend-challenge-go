@@ -13,7 +13,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-PG_CONTAINER="${PG_CONTAINER:-wallet_postgres_1}"
+PG_CONTAINER="${PG_CONTAINER:-}"
 PG_USER="${PG_USER:-wallet}"
 PG_DB="${PG_DB:-wallet}"
 
@@ -21,6 +21,24 @@ if ! command -v docker >/dev/null 2>&1; then
   echo "load-verify: docker/podman not found on PATH" >&2
   exit 1
 fi
+
+# Resolve the container by ASKING compose, instead of assuming a name.
+#
+# The old default was the literal `wallet_postgres_1`, which is what Podman's
+# compose names it — and it silently broke in GitHub Actions, where Docker
+# Compose v2 names the same service `wallet-postgres-1` (hyphens, not
+# underscores). Hardcoding either spelling makes the tool pass on one engine
+# and fail on the other, so we let compose answer: `compose ps -q <service>`
+# prints the container id for whichever engine and project name are in play.
+# PG_CONTAINER still overrides, for the rare case of an externally managed DB.
+if [[ -z "$PG_CONTAINER" ]]; then
+  # `|| true`: the resolver is best-effort. A compose implementation that does
+  # not support `ps -q` (podman-compose, for one) exits non-zero here, and with
+  # `set -e` that would abort the script before the fallback below ever runs —
+  # turning a missing feature into a hard failure. The fallback is the point.
+  PG_CONTAINER="$(docker compose ps -q postgres 2>/dev/null | head -n1 | xargs -r docker inspect --format '{{.Name}}' 2>/dev/null | sed 's|^/||' || true)"
+fi
+PG_CONTAINER="${PG_CONTAINER:-wallet_postgres_1}"
 
 if ! docker ps --format '{{.Names}}' | grep -qx "$PG_CONTAINER"; then
   echo "load-verify: container '$PG_CONTAINER' is not running." >&2
