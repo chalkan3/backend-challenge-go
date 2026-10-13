@@ -73,6 +73,8 @@ services:
       # but tokens are issued with the localhost issuer ( callers run on host)
       WALLET_AUTH_JWKS_URL: http://keycloak:8080/realms/wallet/protocol/openid-connect/certs
       WALLET_WORKERS_ENABLED: "true"
+      WALLET_RECONCILE_INTERVAL: "${WALLET_RECONCILE_INTERVAL:-5m}"
+      WALLET_RECONCILE_BATCH: "${WALLET_RECONCILE_BATCH:-100}"
       WALLET_LOG_LEVEL: info
       WALLET_OTEL_ENABLED: "${WALLET_OTEL_ENABLED:-false}"
       WALLET_OTEL_LOGS_ENABLED: "true"

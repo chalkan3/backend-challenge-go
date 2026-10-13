@@ -67,7 +67,7 @@ func TestRegisterMigrationsRegistersHookWhenEnabled(t *testing.T) {
 func TestRegisterWorkersSkipsByModeAndConfig(t *testing.T) {
 	t.Run("api mode", func(t *testing.T) {
 		lc := &capturingLifecycle{}
-		registerWorkers(lc, &config.Config{Mode: config.ModeAPI}, slog.Default(), nil, nil, nil)
+		registerWorkers(lc, &config.Config{Mode: config.ModeAPI}, slog.Default(), nil, nil, nil, nil)
 		assert.Empty(t, lc.hooks)
 	})
 
@@ -76,7 +76,7 @@ func TestRegisterWorkersSkipsByModeAndConfig(t *testing.T) {
 		registerWorkers(lc, &config.Config{
 			Mode:           config.ModeAll,
 			WorkersEnabled: false,
-		}, slog.Default(), nil, nil, nil)
+		}, slog.Default(), nil, nil, nil, nil)
 		assert.Empty(t, lc.hooks)
 	})
 }

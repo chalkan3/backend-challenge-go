@@ -48,6 +48,13 @@ type Config struct {
 	ReferenceMaxAttempts int
 	ReferenceTTL         time.Duration
 
+	// Continuous reconciliation: the background worker sweeps wallets in
+	// keyset batches, comparing each stored balance against its ledger. The
+	// interval bounds the worst-case detection lag; the batch bounds memory
+	// and how long one pass holds a read.
+	ReconcileInterval time.Duration
+	ReconcileBatch    int
+
 	AuthIssuer   string // e.g. http://localhost:8080/realms/wallet
 	AuthJWKSURL  string // optional override; derived from issuer when empty
 	AuthAudience string // optional audience check; empty disables it
@@ -106,6 +113,9 @@ func Load() (*Config, error) {
 		ReferenceBatch:       envInt("WALLET_REFERENCE_BATCH", 50),
 		ReferenceMaxAttempts: envInt("WALLET_REFERENCE_MAX_ATTEMPTS", 10),
 		ReferenceTTL:         envDuration("WALLET_REFERENCE_TTL", 15*time.Minute),
+
+		ReconcileInterval: envDuration("WALLET_RECONCILE_INTERVAL", 5*time.Minute),
+		ReconcileBatch:    envInt("WALLET_RECONCILE_BATCH", 100),
 
 		AuthIssuer:   env("WALLET_AUTH_ISSUER", "http://localhost:8080/realms/wallet"),
 		AuthJWKSURL:  env("WALLET_AUTH_JWKS_URL", ""),

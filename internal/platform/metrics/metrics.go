@@ -34,6 +34,8 @@ type Metrics struct {
 	ConsumerRetries           metrics.Counter
 	ConsumerDLQ               metrics.Counter
 	ReconciliationDivergences metrics.Counter
+	ReconciliationChecked     metrics.Counter
+	ReconciliationSweeps      metrics.Counter
 	AuthFailures              metrics.Counter // reason
 	ReferenceResolved         metrics.Counter // outcome
 }
@@ -70,6 +72,10 @@ func New() *Metrics {
 			"Messages moved to the dead-letter queue."),
 		ReconciliationDivergences: newCounter(reg, "reconciliation", "divergences_total",
 			"Reconciliations that found stored balance != ledger balance."),
+		ReconciliationChecked: newCounter(reg, "reconciliation", "checked_total",
+			"Wallets whose stored balance was compared against the ledger."),
+		ReconciliationSweeps: newCounter(reg, "reconciliation", "sweeps_total",
+			"Background reconciliation passes that completed."),
 		AuthFailures: newCounter(reg, "auth", "failures_total",
 			"Authentication/authorization failures by reason.", "reason"),
 		ReferenceResolved: newCounter(reg, "reference", "resolved_total",

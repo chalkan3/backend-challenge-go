@@ -90,6 +90,7 @@ func (h *relayHook) OutboxFailed()    { h.failed++ }
 func (h *relayHook) OutboxStats(int64, float64) {
 	h.stats++
 }
+func (h *relayHook) ReconciliationSweep(int) {}
 func (h *relayHook) StartSpan(ctx context.Context, _ string, _ ...SpanAttr) (context.Context, Span) {
 	return ctx, noopSpan{}
 }

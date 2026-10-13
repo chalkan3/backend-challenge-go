@@ -111,6 +111,13 @@ arquitetura), table-driven e sem I/O.
   armazenado × soma do ledger **em um único statement SQL** (snapshot
   consistente, sem lock) e nunca altera estado; divergência vira log ERROR,
   resposta e métrica `wallet_reconciliation_divergences_total`.
+- Uma varredura **contínua** (worker de reconciliação) passa todas as carteiras
+  em lotes keyset a cada `WALLET_RECONCILE_INTERVAL`, usando o **mesmo** caso de
+  uso `Reconcile` da rota HTTP — a reconciliação sob demanda só acha o que
+  alguém pergunta, a varredura transforma a detecção em propriedade do sistema
+  rodando. É somente-leitura: relata (`reconciliation_divergences_total`), nunca
+  corrige — o ledger é a única fonte de verdade, uma divergência é fato a
+  expor, não número a maquiar.
 
 ## 4. Idempotência
 

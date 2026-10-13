@@ -8,6 +8,7 @@ package service_test
 import (
 	"context"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -160,6 +161,26 @@ func (r fakeWallets) GetByPlayerAndCurrency(_ context.Context, playerID uuid.UUI
 		}
 	}
 	return nil, service.ErrRepoNotFound
+}
+
+// ListIDs mirrors the SQL keyset contract: ids strictly greater than after,
+// ascending, at most limit. Ordering is explicit so the fake has the same
+// total order as the ORDER BY id ASC it stands in for (map iteration order
+// is random).
+func (r fakeWallets) ListIDs(_ context.Context, after *uuid.UUID, limit int) ([]uuid.UUID, error) {
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	var ids []uuid.UUID
+	for id := range r.s.wallets {
+		if after == nil || id.String() > after.String() {
+			ids = append(ids, id)
+		}
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i].String() < ids[j].String() })
+	if limit > 0 && len(ids) > limit {
+		ids = ids[:limit]
+	}
+	return ids, nil
 }
 
 // fakeWalletOpens records wallet-opening idempotency keys in memory.

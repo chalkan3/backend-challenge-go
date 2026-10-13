@@ -333,6 +333,7 @@ type silentOutbox struct{}
 func (silentOutbox) OutboxPublished()                       {}
 func (silentOutbox) OutboxFailed()                          {}
 func (silentOutbox) OutboxStats(pending int64, lag float64) {}
+func (silentOutbox) ReconciliationSweep(int)                {}
 
 // StartSpan returns a no-op span: these workers are driven against real SQS
 // and Postgres; tracing is not the subject under test.

@@ -44,6 +44,7 @@ transactional outbox, inbox durável e controle de concorrência por carteira.
   - [Testes de carga (k6)](#testes-de-carga-k6)
 - [Integração contínua](#-integração-contínua)
 - [Verificação com race detector (réplicas)](#-verificação-com-race-detector-réplicas)
+- [Reconciliação contínua](#-reconciliação-contínua)
 - [Simulações de falha](#-simulações-de-falha)
 - [Decisões técnicas](#-decisões-técnicas)
   - [Partidas dobradas (diferencial opcional)](#partidas-dobradas-diferencial-opcional)
@@ -86,6 +87,7 @@ flowchart TB
         CONS["messaging/consumer<br/>worker SQS"]
         REL["messaging/relay<br/>outbox publisher"]
         REF["messaging/reference<br/>resolvedor de referências"]
+        REC["messaging/reconcile<br/>varredura de reconciliação"]
     end
 
     subgraph Core["🧠 Núcleo (sem dependências de infra)"]
@@ -106,6 +108,7 @@ flowchart TB
     CONS --> SVC
     REL --> SVC
     REF --> SVC
+    REC --> SVC
     SVC --> DOM
     SVC --> PG
     REL --> SQS
@@ -118,7 +121,7 @@ flowchart TB
     classDef adapter fill:#425CC722,stroke:#425CC7
     classDef ext fill:#FF990022,stroke:#FF9900
     class SVC,DOM core
-    class HTTP,CONS,REL,REF,PG,SQS,AUTH,MET adapter
+    class HTTP,CONS,REL,REF,REC,PG,SQS,AUTH,MET adapter
     class P,C,O ext
 ```
 
@@ -470,9 +473,10 @@ Todas documentadas em [`.env.example`](.env.example). As principais:
 | `WALLET_SQS_ENDPOINT` | Endpoint SQS (LocalStack local / AWS em produção) |
 | `WALLET_AUTH_ISSUER` | Issuer OIDC validado no `iss` do token |
 | `WALLET_AUTH_JWKS_URL` | Override do JWKS (ambientes com hosts distintos) |
-| `WALLET_WORKERS_ENABLED` | Liga/desliga consumer, outbox e reference resolver |
+| `WALLET_WORKERS_ENABLED` | Liga/desliga consumer, outbox, reference resolver e reconciliação |
 | `WALLET_MODE` | Papel do processo: `all` (padrão), `api` ou `workers` |
 | `WALLET_REFERENCE_TTL` / `WALLET_REFERENCE_MAX_ATTEMPTS` | Política de referências pendentes |
+| `WALLET_RECONCILE_INTERVAL` / `WALLET_RECONCILE_BATCH` | Cadência e tamanho do lote da varredura de reconciliação (padrão `5m` / `100`) |
 | `WALLET_OTEL_ENABLED` | Liga o tracing (padrão `false`) |
 
 ### Migrations
@@ -886,6 +890,83 @@ Saída real de uma execução (`make race-replicas`):
     wallet_race_3    DATA RACE lines: 0
 ==> race-replicas: PASS — detector proven live, replicas race-free, ledger consistent
 ```
+
+---
+
+## 🧮 Reconciliação contínua
+
+A reconciliação sob demanda (`POST /wallets/{id}/reconciliation`) responde
+"esta carteira está consistente?" — mas só se alguém perguntar **por aquela
+carteira**. Uma carteira cujo saldo foi corrompido por um deploy ruim ou um
+`UPDATE` manual fica indetectada até um cliente, por acaso, reconciliá-la.
+
+O **worker de reconciliação** fecha essa janela: a cada
+`WALLET_RECONCILE_INTERVAL` ele varre **todas** as carteiras em lotes keyset e
+compara cada saldo armazenado com a soma do seu ledger. Uma divergência que
+exista enquanto ninguém olhava passa a ser um fato do sistema em execução, não
+uma pergunta que depende de um cliente.
+
+```sh
+# cadência curta para observar o comportamento localmente
+WALLET_RECONCILE_INTERVAL=2s docker compose up -d --force-recreate app
+curl -s localhost:8081/metrics | grep ^wallet_reconciliation
+```
+
+**Ele é somente-leitura — e isso é uma decisão, não uma omissão.** O worker
+relata e instrumenta; nunca corrige. Auto-correção silenciosa seria um segundo
+caminho de escrita de saldo, e o ledger é a única fonte de verdade: uma
+divergência é um fato a ser exposto, não um número a ser maquiado. A varredura
+reusa o **mesmo caso de uso** que a rota HTTP chama (`WalletService.Reconcile`),
+então não há uma segunda implementação da aritmética para divergir da primeira.
+
+### Varredura em lotes, não `OFFSET`
+
+As carteiras são paginadas por **keyset** (`WHERE id > $last ORDER BY id LIMIT
+$n`), não por `OFFSET`. `id` é uma ordem total que sobrevive a inserções e
+remoções concorrentes durante a passagem: nenhuma carteira é pulada ou visitada
+duas vezes, e a memória fica limitada ao tamanho do lote — não importa se a
+tabela tem mil ou milhões de linhas.
+
+Uma carteira removida entre a listagem e a checagem (corrida de ciclo de vida) é
+**ignorada**, não contada: `Reconcile` mapeia o `ErrRepoNotFound` do repositório
+para `WALLET_NOT_FOUND`, e é esse código — não o sentinela do repositório — que
+identifica o caso benigno.
+
+### Métricas
+
+Três séries, no mesmo registry das demais:
+
+| Métrica | Significado |
+| :-- | :-- |
+| `wallet_reconciliation_sweeps_total` | passagens completas — distingue "sem divergência" de "**nenhuma varredura rodou**" |
+| `wallet_reconciliation_checked_total` | carteiras comparadas contra o ledger |
+| `wallet_reconciliation_divergences_total` | carteiras divergentes — **compartilhada** com a rota sob demanda |
+
+> [!IMPORTANT]
+> `divergences_total` é incrementada em **um só lugar**: o caso de uso
+> `WalletService.Reconcile`, que a rota HTTP e a varredura compartilham. O worker
+> **não** soma de novo — isso contaria cada divergência duas vezes (uma pelo
+> `Reconcile`, outra pelo resumo da varredura). O setup é verificado contando:
+> com uma divergência plantada e N passagens, a série lê exatamente N.
+
+### Saída real (divergência plantada por `UPDATE` direto)
+
+```
+wallet_reconciliation_sweeps_total 5
+wallet_reconciliation_checked_total 870          # 5 passagens × 174 carteiras
+wallet_reconciliation_divergences_total 5        # 1 plantada, vista uma vez por passagem
+```
+
+```json
+{"level":"ERROR","msg":"reconciliation divergence","walletId":"01a1363e-…","stored":"213.45","calculated":"90.00","difference":"123.45"}
+{"level":"ERROR","msg":"reconciliation sweep found divergences","worker":"reconcile","checked":174,"divergences":1}
+```
+
+O teste de integração `TestContinuousReconciliationFindsPlantedDivergence` roda o
+worker contra o **banco real**, planta a divergência com um `UPDATE` na tabela
+`wallets` (o ledger fica intacto — o trigger append-only proíbe editá-lo), e
+verifica tanto a detecção quanto o controle positivo: reparado o saldo, a mesma
+carteira reconcilia limpa.
 
 ---
 

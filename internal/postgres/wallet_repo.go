@@ -54,6 +54,34 @@ func (r *walletRepo) GetByPlayerAndCurrency(ctx context.Context, playerID uuid.U
 	return scanWallet(r.ex.QueryRow(ctx, q, playerID, currency))
 }
 
+// ListIDs pages wallet ids by primary key (id ASC) with a keyset cursor,
+// never OFFSET. The sweep that drives continuous reconciliation uses it to
+// walk the whole table in bounded batches: ordering by id is a total order
+// that survives concurrent inserts and deletes, so no wallet is skipped or
+// visited twice across the pages of one pass.
+func (r *walletRepo) ListIDs(ctx context.Context, after *uuid.UUID, limit int) ([]uuid.UUID, error) {
+	rows, err := r.ex.Query(ctx, `
+		SELECT id FROM wallets
+		WHERE ($1::uuid IS NULL OR id > $1)
+		ORDER BY id ASC
+		LIMIT $2`,
+		after, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 func scanWallet(row pgx.Row) (*domain.Wallet, error) {
 	var id, playerID uuid.UUID
 	var currency string

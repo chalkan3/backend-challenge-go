@@ -91,7 +91,15 @@ type WalletRepository interface {
 	// operations on the same wallet (per-wallet locking; independent wallets
 	// never block each other).
 	GetForUpdate(ctx context.Context, id uuid.UUID) (*domain.Wallet, error)
+	// GetByPlayerAndCurrency returns the wallet of (player, currency),
+	// optionally locking the row.
 	GetByPlayerAndCurrency(ctx context.Context, playerID uuid.UUID, currency string, forUpdate bool) (*domain.Wallet, error)
+	// ListIDs pages wallet ids with a keyset cursor (id ASC). A nil after
+	// starts from the beginning; the caller advances with the last returned
+	// id. Ordering by the primary key gives the reconciliation sweep a total
+	// order without OFFSET, so a pass never skips or repeats a row when
+	// wallets are inserted or removed while it runs.
+	ListIDs(ctx context.Context, after *uuid.UUID, limit int) ([]uuid.UUID, error)
 }
 
 // WalletOpenRepository stores the durable idempotency identity of a wallet

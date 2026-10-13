@@ -182,6 +182,12 @@ func (r *faultWallets) GetByPlayerAndCurrency(ctx context.Context, p uuid.UUID, 
 	return r.next.GetByPlayerAndCurrency(ctx, p, c, l)
 }
 
+// ListIDs is not faulted: no reconciliation-sweep test injects a listing
+// failure through this fake, so it delegates straight through.
+func (r *faultWallets) ListIDs(ctx context.Context, after *uuid.UUID, limit int) ([]uuid.UUID, error) {
+	return r.next.ListIDs(ctx, after, limit)
+}
+
 type faultOpens struct {
 	next service.WalletOpenRepository
 	f    *faults

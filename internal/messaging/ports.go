@@ -10,6 +10,13 @@ type Instrumentation interface {
 	OutboxFailed()
 	OutboxStats(pending int64, lagSeconds float64)
 
+	// ReconciliationSweep reports a completed background pass: how many
+	// wallets were compared. Divergences are NOT reported here — the use case
+	// counts each one through service.Instrumentation.ReconciliationDivergence,
+	// which both the on-demand route and this sweep share, so counting them
+	// again would double every mismatch the sweep finds.
+	ReconciliationSweep(checked int)
+
 	// StartSpan opens a child span for one relay tick and returns the
 	// derived context plus a Span façade. It never returns a nil Span.
 	StartSpan(ctx context.Context, name string, attrs ...SpanAttr) (context.Context, Span)
@@ -68,6 +75,7 @@ const (
 	SpanOutboxTick     = "wallet.outbox.tick"
 	SpanOutboxPublish  = "wallet.outbox.publish"
 	SpanReferenceTick  = "wallet.worker.reference_tick"
+	SpanReconcileSweep = "wallet.worker.reconcile_sweep"
 )
 
 // Attribute keys reported by the workers.
@@ -80,4 +88,6 @@ const (
 	AttrOutboxBatch   = "wallet.outbox.batch"
 	AttrOutboxPending = "wallet.outbox.pending"
 	AttrReferenceSize = "wallet.reference.batch"
+	AttrReconcileSize = "wallet.reconcile.batch"
+	AttrDivergences   = "wallet.reconcile.divergences"
 )

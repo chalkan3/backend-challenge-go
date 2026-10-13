@@ -35,6 +35,20 @@ func (a *messagingAdapter) OutboxStats(pending int64, lagSeconds float64) {
 	a.m.OutboxLagSeconds.Set(float64(lagSeconds))
 }
 
+// ReconciliationSweep accounts for one completed background pass: the number
+// of wallets whose balance was compared against the ledger. It feeds
+// sweeps_total and checked_total.
+//
+// It does NOT touch divergences_total on purpose. Each divergence is counted
+// once by the use case — WalletService.Reconcile calls
+// ReconciliationDivergence for every mismatch — and that counter is shared
+// with the on-demand HTTP reconcile. Counting again here would make one bad
+// wallet register twice per sweep.
+func (a *messagingAdapter) ReconciliationSweep(checked int) {
+	a.m.ReconciliationSweeps.Add(1)
+	a.m.ReconciliationChecked.Add(float64(checked))
+}
+
 // --- messaging.ConsumerMetrics ----------------------------------------------
 
 func (a *messagingAdapter) Received()         { a.m.ConsumerReceived.Add(1) }

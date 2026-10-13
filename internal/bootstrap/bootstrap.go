@@ -115,6 +115,7 @@ var App = fx.Options(
 	fx.Module("workers",
 		fx.Provide(messaging.NewOutboxWorker),
 		fx.Provide(messaging.NewReferenceWorker),
+		fx.Provide(messaging.NewReconcileWorker),
 		fx.Provide(messaging.NewConsumer),
 	),
 	// 1st invoke: pool closes LAST (OnStop runs in reverse append order).
@@ -196,7 +197,8 @@ func registerHTTP(lc fx.Lifecycle, cfg *config.Config, log *slog.Logger, srv *ht
 }
 
 func registerWorkers(lc fx.Lifecycle, cfg *config.Config, log *slog.Logger,
-	ow *messaging.OutboxWorker, rw *messaging.ReferenceWorker, cons *messaging.Consumer,
+	ow *messaging.OutboxWorker, rw *messaging.ReferenceWorker, rec *messaging.ReconcileWorker,
+	cons *messaging.Consumer,
 ) {
 	if !cfg.Mode.RunsWorkers(cfg.WorkersEnabled) {
 		if cfg.Mode == config.ModeAPI {
@@ -225,6 +227,7 @@ func registerWorkers(lc fx.Lifecycle, cfg *config.Config, log *slog.Logger,
 			}
 			run("outbox", ow.Run)
 			run("references", rw.Run)
+			run("reconcile", rec.Run)
 			run("consumer", cons.Run)
 			go func() { wg.Wait(); close(done) }()
 			return nil
