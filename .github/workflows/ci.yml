@@ -114,6 +114,36 @@ jobs:
         if: failure()
         run: docker compose ps
 
+  # ── Load: the k6 smoke + the independent integrity audit ───────────────────
+  load:
+    name: load (k6 smoke · integrity audit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bring the stack up
+        run: UP_ONLY=1 ./scripts/e2e.sh
+
+      - name: k6 smoke — the whole contract, asserted
+        # Runs from the pinned k6 image, so the CI version matches the local one.
+        # This is the gate: a broken contract fails here in seconds.
+        run: make load-smoke
+
+      - name: k6 hot-wallet — the row lock under contention
+        run: make load-hot VUS=48 ITER_PER_VU=7
+
+      - name: Integrity audit — what was committed, not what was answered
+        run: make load-verify
+
+      - name: Logs (on failure)
+        if: failure()
+        run: docker compose logs --no-color --tail=200
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
   # ── The split topology: WALLET_MODE=api + WALLET_MODE=workers ──────────────
   e2e-split:
     name: e2e split (api + workers)

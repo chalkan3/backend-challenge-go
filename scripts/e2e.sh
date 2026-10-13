@@ -8,6 +8,8 @@
 #   MULTI=1 ./scripts/e2e.sh      # three combined apps (distributed concurrency)
 #   ./scripts/e2e.sh -run Journey # pass extra flags straight to `go test`
 #   KEEP=1 ./scripts/e2e.sh       # leave the stack running afterwards
+#   UP_ONLY=1 ./scripts/e2e.sh    # bring the stack up and stop (no suite), for
+#                                 # other tools (k6) to drive it; implies KEEP
 #
 # Engine/compose detection is centralised in scripts/engine.sh so every entry
 # point (this script, the Makefile) agrees on podman vs docker, and a port
@@ -43,8 +45,8 @@ if [ "${SPLIT:-0}" = "1" ]; then
 fi
 
 cleanup() {
-  if [ "${KEEP:-0}" = "1" ]; then
-    echo "==> KEEP=1: leaving the stack up (tear down with: $COMPOSE ${PROFILE_FLAGS[*]:-} down -v)"
+  if [ "${KEEP:-0}" = "1" ] || [ "${UP_ONLY:-0}" = "1" ]; then
+    echo "==> leaving the stack up (tear down with: $COMPOSE ${PROFILE_FLAGS[*]:-} down -v)"
     return
   fi
   echo "==> tearing down"
@@ -112,6 +114,13 @@ export WALLET_TEST_KEYCLOAK="${WALLET_TEST_KEYCLOAK:-http://localhost:8080}"
 [ "${MULTI:-0}" = "1" ] && export WALLET_TEST_API_URL_2="${WALLET_TEST_API_URL_2:-http://localhost:8082}" || true
 
 echo "==> running integration suite (race detector on)"
+if [ "${UP_ONLY:-0}" = "1" ]; then
+  # The stack is up and healthy; the caller (k6, a manual session) owns it now.
+  echo "==> UP_ONLY=1: stack is ready, skipping the integration suite"
+  echo "    API:${API_URL_DEFAULT}  teardown: $COMPOSE ${PROFILE_FLAGS[*]:-} down -v"
+  exit 0
+fi
+
 if ! go test -race -count=1 -tags=integration -timeout 15m -v ./test/integration/... "$@"; then
   echo "" >&2
   echo "==> suite FAILED — last 80 lines of the app log (for triage):" >&2
