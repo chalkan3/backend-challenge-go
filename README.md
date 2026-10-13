@@ -19,7 +19,7 @@ transactional outbox, inbox durável e controle de concorrência por carteira.
 [![Release](https://github.com/chalkan3/backend-challenge-go/actions/workflows/release.yml/badge.svg)](https://github.com/chalkan3/backend-challenge-go/actions/workflows/release.yml)
 [![Testes unitários](https://img.shields.io/badge/unit%20tests-427%20passing-2ea043)](#-testes)
 [![Testes de integração](https://img.shields.io/badge/integration%20tests-63%20passing-2ea043)](#-testes)
-[![Cobertura](https://img.shields.io/badge/coverage-73.7%25%20%E2%86%92%2090%25-yellow)](#-testes)
+[![Cobertura](https://img.shields.io/badge/coverage-90%25-2ea043)](#-testes)
 [![Go Report Card](https://goreportcard.com/badge/github.com/chalkan3/backend-challenge-go)](https://goreportcard.com/report/github.com/chalkan3/backend-challenge-go)
 
 </div>
