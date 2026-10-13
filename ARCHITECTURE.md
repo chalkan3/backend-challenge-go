@@ -276,8 +276,24 @@ disparava com o IdP fora no boot, invisível no caminho feliz. O
     que bater com o do token (403), inclusive em **replays e consultas**;
   - Isolamento também vale para referências: provider-b não consegue
     resolver referência de provider-a (fica pendente e nunca credita).
-- Mensageria: credenciais de teste do LocalStack no compose; em produção o
-  acesso à fila seria controlado por IAM/policies do broker. As validações
+- Policies do token (ver `deploy/keycloak/README.md`): a autorização é por
+  **claim** (`providerId` / `wallet:internal`), que é *assinada* e logo
+  infalsificável — o escopo **não** é portão, apenas higiene. O realm emite
+  escopo enxuto (`fullScopeAllowed: false`, client scopes `wallet:provider` /
+  `wallet:internal`), de modo que `email`/`profile`/roles não entram num token
+  de máquina, e injeta `aud=wallet-api`; o serviço **exige** essa audience
+  (`WALLET_AUTH_AUDIENCE`), e um token emitido para outro público no mesmo
+  realm é recusado. Política de token não é decorativa: é provada contra o
+  realm vivo em `test/integration/keycloak_policy_test.go`.
+- Mensageria: credenciais de teste do LocalStack no compose. As políticas de
+  fila aplicadas (redrive para DLQ, long polling, retenção, dedup por id de
+  evento) são provisionadas por `deploy/localstack/init/10-queues.py` e
+  provadas — atributo lido de volta **e** comportamento (mensagem observada
+  chegando à DLQ) — em `test/integration/sqs_policy_test.go`. **Resource
+  policy e IAM não são aplicados pelo LocalStack community** (medido: uma
+  `Deny *` foi gravada e o `SendMessage` passou); por isso não há nenhuma
+  provisionada aqui, e há um teste que fixa esse limite. Em AWS real, o acesso
+  à fila seria controlado por resource policy + IAM por serviço. As validações
   de domínio permanecem no consumidor (o token viaja no payload do evento
   de negócio, e a identidade do publicador é responsabilidade do broker).
 

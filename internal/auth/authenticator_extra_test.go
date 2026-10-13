@@ -90,3 +90,36 @@ func TestValidateEnforcesAudienceWhenConfigured(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "provider-a", p.ProviderID)
 }
+
+// TestValidateCapturesScopeButDoesNotGateOnIt pins the scope policy: the scope
+// claim is parsed into Principal.Scopes (so it can be logged and asserted),
+// while carrying the identity claims alone is still sufficient to authenticate.
+// Minting a minimal scope is a realm concern; refusing a token because of a
+// missing scope is NOT — see the package doc.
+func TestValidateCapturesScopeButDoesNotGateOnIt(t *testing.T) {
+	t.Parallel()
+	idp := newTestIdP(t)
+
+	// A provider token whose scope is the narrowed wallet scope.
+	claims := providerClaims()
+	claims["scope"] = "wallet:provider wallet:audience"
+	raw := idp.sign(t, claims, time.Now().Add(10*time.Minute))
+	p, err := idp.auth.Validate(raw)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"wallet:provider", "wallet:audience"}, p.Scopes)
+	assert.True(t, p.HasScope("wallet:provider"))
+	assert.False(t, p.HasScope("wallet:internal"))
+
+	// The same identity with a wide scope still authenticates: scope is not a
+	// gate. A token with NO scope claim at all is equally accepted.
+	wide := providerClaims()
+	wide["scope"] = "profile email"
+	pw, err := idp.auth.Validate(idp.sign(t, wide, time.Now().Add(10*time.Minute)))
+	require.NoError(t, err)
+	assert.False(t, pw.HasScope("wallet:provider"), "wide scope must not fake the wallet scope")
+
+	none := idp.sign(t, providerClaims(), time.Now().Add(10*time.Minute))
+	pn, err := idp.auth.Validate(none)
+	require.NoError(t, err)
+	assert.Nil(t, pn.Scopes, "absent scope claim yields nil, not [\"\"]")
+}

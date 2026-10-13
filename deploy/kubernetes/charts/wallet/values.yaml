@@ -237,6 +237,10 @@ auth:
   #    This value is THE source of WALLET_AUTH_ISSUER (configmap.yaml); do not
   #    derive it from nodePorts: the NodePort is never in an `iss`.
   issuer: http://localhost:8080/realms/wallet
+  # -- Audience the service REQUIRES in the access token (`aud`). The realm
+  #    embedded in this chart injects `aud=wallet-api` via the `wallet:audience`
+  #    client scope, so this must match it. Empty disables the check.
+  audience: wallet-api
   # -- JWKS is fetched by the pod itself, so it uses cluster DNS and cannot be
   #    localhost. Only used when keycloak.enabled=false.
   jwksURL: ""

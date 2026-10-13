@@ -162,6 +162,10 @@ services:
       # inside the compose network the IdP is reachable via the service name,
       # but tokens are issued with the localhost issuer ( callers run on host)
       WALLET_AUTH_JWKS_URL: http://keycloak:8080/realms/wallet/protocol/openid-connect/certs
+      # Audience policy: the realm mints aud=wallet-api (client scope
+      # wallet:audience). Requiring it here means a token minted for another
+      # audience in the same realm is refused — see deploy/keycloak/README.md.
+      WALLET_AUTH_AUDIENCE: wallet-api
       WALLET_WORKERS_ENABLED: "true"
       WALLET_RECONCILE_INTERVAL: "${WALLET_RECONCILE_INTERVAL:-5m}"
       WALLET_RECONCILE_BATCH: "${WALLET_RECONCILE_BATCH:-100}"
@@ -195,6 +199,10 @@ services:
       WALLET_SQS_ENDPOINT: http://localstack:4566
       WALLET_AUTH_ISSUER: http://localhost:8080/realms/wallet
       WALLET_AUTH_JWKS_URL: http://keycloak:8080/realms/wallet/protocol/openid-connect/certs
+      # Audience policy: the realm mints aud=wallet-api (client scope
+      # wallet:audience). Requiring it here means a token minted for another
+      # audience in the same realm is refused — see deploy/keycloak/README.md.
+      WALLET_AUTH_AUDIENCE: wallet-api
       WALLET_WORKERS_ENABLED: "true"
       WALLET_OTEL_ENABLED: "${WALLET_OTEL_ENABLED:-false}"
       WALLET_OTEL_LOGS_ENABLED: "true"
@@ -223,6 +231,10 @@ services:
       WALLET_SQS_ENDPOINT: http://localstack:4566
       WALLET_AUTH_ISSUER: http://localhost:8080/realms/wallet
       WALLET_AUTH_JWKS_URL: http://keycloak:8080/realms/wallet/protocol/openid-connect/certs
+      # Audience policy: the realm mints aud=wallet-api (client scope
+      # wallet:audience). Requiring it here means a token minted for another
+      # audience in the same realm is refused — see deploy/keycloak/README.md.
+      WALLET_AUTH_AUDIENCE: wallet-api
       WALLET_WORKERS_ENABLED: "true"
       WALLET_OTEL_ENABLED: "${WALLET_OTEL_ENABLED:-false}"
       WALLET_OTEL_LOGS_ENABLED: "true"
@@ -275,6 +287,10 @@ services:
       WALLET_SQS_SECRET_KEY: test
       WALLET_AUTH_ISSUER: http://localhost:8080/realms/wallet
       WALLET_AUTH_JWKS_URL: http://keycloak:8080/realms/wallet/protocol/openid-connect/certs
+      # Audience policy: the realm mints aud=wallet-api (client scope
+      # wallet:audience). Requiring it here means a token minted for another
+      # audience in the same realm is refused — see deploy/keycloak/README.md.
+      WALLET_AUTH_AUDIENCE: wallet-api
       WALLET_WORKERS_ENABLED: "true"
       WALLET_RECONCILE_INTERVAL: "${WALLET_RECONCILE_INTERVAL:-5m}"
       WALLET_RECONCILE_BATCH: "${WALLET_RECONCILE_BATCH:-100}"
@@ -325,6 +341,10 @@ services:
       WALLET_SQS_ENDPOINT: http://localstack:4566
       WALLET_AUTH_ISSUER: http://localhost:8080/realms/wallet
       WALLET_AUTH_JWKS_URL: http://keycloak:8080/realms/wallet/protocol/openid-connect/certs
+      # Audience policy: the realm mints aud=wallet-api (client scope
+      # wallet:audience). Requiring it here means a token minted for another
+      # audience in the same realm is refused — see deploy/keycloak/README.md.
+      WALLET_AUTH_AUDIENCE: wallet-api
       WALLET_MIGRATE_ON_START: "true"
       WALLET_LOG_LEVEL: info
       WALLET_OTEL_ENABLED: "${WALLET_OTEL_ENABLED:-false}"
@@ -353,6 +373,10 @@ services:
       WALLET_SQS_ENDPOINT: http://localstack:4566
       WALLET_AUTH_ISSUER: http://localhost:8080/realms/wallet
       WALLET_AUTH_JWKS_URL: http://keycloak:8080/realms/wallet/protocol/openid-connect/certs
+      # Audience policy: the realm mints aud=wallet-api (client scope
+      # wallet:audience). Requiring it here means a token minted for another
+      # audience in the same realm is refused — see deploy/keycloak/README.md.
+      WALLET_AUTH_AUDIENCE: wallet-api
       # The schema is owned by the api/deploy step; N consumers must not race
       # on the same goose table at startup.
       WALLET_MIGRATE_ON_START: "false"

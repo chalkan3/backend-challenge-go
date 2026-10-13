@@ -48,6 +48,9 @@ transactional outbox, inbox durável e controle de concorrência por carteira.
 - [Banco: pooling e auditoria](#-banco-pooling-e-auditoria)
   - [PgBouncer — pool de conexões](#pgbouncer--pool-de-conexões)
   - [pgAudit — auditoria no servidor](#pgaudit--auditoria-no-servidor)
+- [Políticas: Keycloak e SQS](#-políticas-keycloak-e-sqs)
+  - [Keycloak — identidade e audience](#keycloak--identidade-e-audience)
+  - [SQS — políticas de fila](#sqs--políticas-de-fila)itoria-no-servidor)
 - [Simulações de falha](#-simulações-de-falha)
 - [Decisões técnicas](#-decisões-técnicas)
   - [Partidas dobradas (diferencial opcional)](#partidas-dobradas-diferencial-opcional)
@@ -69,6 +72,7 @@ nunca seja contado duas vezes nem perdido**.
 | 📥 **Consumo sem duplicação** | **Inbox durável** deduplica por identidade da mensagem |
 | 🔒 **Concorrência** | Lock row-level por carteira + `version` otimista; carteiras distintas progridem em paralelo |
 | 🧮 **Precisão monetária** | `Money` é um value object em unidades menores (`int64`), nunca `float` |
+| 🛡️ **Identidade mínima** | Token de máquina com escopo enxuto e `aud` exigida; filas com redrive e long polling provados |
 
 ---
 
@@ -237,8 +241,8 @@ loadtest/               # testes de carga em k6 + auditoria de integridade em SQ
 scripts/e2e.sh          # runner: sobe a stack, espera health, roda a suíte, derruba
 deploy/
   observability/        # otel-collector, prometheus, tempo, loki + provisioning Grafana
-  keycloak/             # realm-wallet.json (import automático)
-  localstack/           # init: criação das filas FIFO
+  keycloak/             # realm-wallet.json (import automático) + README das policies
+  localstack/           # init: filas FIFO + README das políticas de fila
   pgbouncer/            # pooler: pgbouncer.ini (transaction mode) + userlist
   pgaudit/              # Dockerfile (Postgres 17 + extensão) + pgaudit.conf
 ```
@@ -482,6 +486,7 @@ Todas documentadas em [`.env.example`](.env.example). As principais:
 | `WALLET_SQS_ENDPOINT` | Endpoint SQS (LocalStack local / AWS em produção) |
 | `WALLET_AUTH_ISSUER` | Issuer OIDC validado no `iss` do token |
 | `WALLET_AUTH_JWKS_URL` | Override do JWKS (ambientes com hosts distintos) |
+| `WALLET_AUTH_AUDIENCE` | Audience **exigida** no `aud` do token (`wallet-api`). Vazio desliga a checagem; o compose define `wallet-api` — ver [Políticas: Keycloak e SQS](#-políticas-keycloak-e-sqs) |
 | `WALLET_WORKERS_ENABLED` | Liga/desliga consumer, outbox, reference resolver e reconciliação |
 | `WALLET_MODE` | Papel do processo: `all` (padrão), `api` ou `workers` |
 | `WALLET_REFERENCE_TTL` / `WALLET_REFERENCE_MAX_ATTEMPTS` | Política de referências pendentes |
@@ -591,11 +596,15 @@ provisionados com `allowUiUpdates: false`): *Wallet — Overview*,
 O realm `wallet` é importado automaticamente
 (`deploy/keycloak/realm-wallet.json`). Três clientes `client_credentials`:
 
-| Cliente | Secret | Poder |
-| :-- | :-- | :-- |
-| `provider-a` | `provider-a-secret` | Operações **apenas** com `providerId=provider-a` |
-| `provider-b` | `provider-b-secret` | Operações **apenas** com `providerId=provider-b` |
-| `wallet-internal` | `internal-secret` | Serviço interno: abre/lê carteiras, vê tudo |
+| Cliente | Secret | Escopo no token | Poder |
+| :-- | :-- | :-- | :-- |
+| `provider-a` | `provider-a-secret` | `wallet:provider` | Operações **apenas** com `providerId=provider-a` |
+| `provider-b` | `provider-b-secret` | `wallet:provider` | Operações **apenas** com `providerId=provider-b` |
+| `wallet-internal` | `internal-secret` | `wallet:internal` | Serviço interno: abre/lê carteiras, vê tudo |
+
+Os escopos são enxutos de propósito — `email`, `profile` e roles de realm
+**não** entram num token de máquina. Ver
+[Políticas: Keycloak e SQS](#-políticas-keycloak-e-sqs).
 
 ### Exemplos de chamada
 
@@ -1106,6 +1115,92 @@ Duas metades, e ambas precisam existir:
    migration vira no-op e a subida segue. Auditoria é um *reforço* da
    integridade, não um pré-requisito de boot — a migration aplica em ambos os
    bancos, com e sem a extensão.
+
+---
+
+## 🛡️ Políticas: Keycloak e SQS
+
+Dois lugares onde **política** significa coisas diferentes, e vale não
+confundir os dois:
+
+| | **Keycloak** | **SQS** |
+| :-- | :-- | :-- |
+| Política sobre | **quem é o principal e o que ele pode afirmar** | **como a fila se comporta sob falha** |
+| Onde se declara | `deploy/keycloak/realm-wallet.json` | `deploy/localstack/init/10-queues.py` |
+| Prova | teste de integração lê o Admin API **e** decodifica o token | teste lê os atributos **e** observa a mensagem chegar na DLQ |
+
+### Keycloak — identidade e audience
+
+Medido no token real de um provedor **antes** destas políticas: `aud: "account"`,
+`scope: "profile email"`, `realm_access.roles`, `resource_access`, `email_verified`.
+Um client de **máquina** recebia escopo e claims de **usuário**, e o serviço
+aceitava — porque `WALLET_AUTH_AUDIENCE` estava vazio, ou seja, um token emitido
+para outro público no mesmo realm também autenticaria.
+
+Depois:
+
+```json
+{ "aud": "wallet-api", "scope": "wallet:audience wallet:provider",
+  "azp": "provider-a", "providerId": "provider-a" }
+```
+
+Três políticas, e a razão de cada uma:
+
+- **Audience** — um client scope `wallet:audience` injeta `aud=wallet-api`, e o
+  serviço **exige** essa audience (`WALLET_AUTH_AUDIENCE: wallet-api` no compose).
+  Emitir sem exigir deixaria o furo aberto; a exigência é o que transforma a
+  emissão em política.
+- **Escopo enxuto** — `fullScopeAllowed: false` e client scopes dedicados
+  (`wallet:provider`, `wallet:internal`). `profile`, `email`, `roles`,
+  `web-origins` e `acr`, que o Keycloak atribui por padrão a *todo* client,
+  deixam de entrar num token de máquina. O escopo **não** é portão de
+  autorização — as claims (`providerId`, `wallet:internal`) são assinadas e já
+  infalsificáveis; exigir escopo adicionaria um modo de falha sem adicionar
+  segurança. O escopo é higiene e observabilidade.
+- **Token/security policies do realm** — `revokeRefreshToken`, `bruteForceProtected`,
+  `eventsEnabled`, `adminEventsEnabled`.
+
+> [!WARNING]
+> **`--import-realm` não reimporta um realm existente.** O Keycloak registra no
+> boot `Strategy: IGNORE_EXISTING`; se o realm `wallet` já existe no volume, um
+> `realm-wallet.json` editado **não** é aplicado. Ambientes antigos precisam
+> recriar o realm. É por isso que a prova é um teste que lê as policies de volta:
+> ele falha alto contra um realm obsoleto, em vez de testar o realm errado.
+
+### SQS — políticas de fila
+
+O que **de fato** protege a mensageria aqui: `RedrivePolicy` (`maxReceiveCount:
+5`, mensagem envenenada vai para a DLQ), `VisibilityTimeout: 60` (precisa exceder
+o orçamento do consumer, ou uma mensagem lenta é reentregue *em voo*),
+`ReceiveMessageWaitTimeSeconds: 20` (long polling), dedup explícita por id de
+evento em `integration-events.fifo`, e retenção de 14 dias na DLQ (mensagem
+quarentenada é evidência de um bug).
+
+> [!NOTE]
+> **Resource policy não é aplicada no LocalStack community — medido.** Um
+> `Deny *` em `sqs:*` foi gravado numa fila e o `SendMessage` passou mesmo
+> assim. `iam`/`sts` estão `disabled` no broker. Provisionar uma resource policy
+> aqui seria config decorativa, então **não há nenhuma** — o teste
+> `TestSQSResourcePolicyIsAcceptedButNotEnforced` fixa esse limite e começará a
+> falhar quando o LocalStack passar a aplicá-las, que é quando o provisionamento
+> deve ganhar uma. Em AWS real: resource policy restringindo o publisher, IAM
+> por serviço no lugar das credenciais estáticas, KMS gerenciado pelo cliente.
+
+A medição também revelou um bug no próprio provisioning: `create_queue` é
+rejeitado com `QueueAlreadyExists` quando os atributos diferem, deixando os
+antigos no lugar — um script que só cria é bootstrap de uma vez só, não
+provisionamento. `ensure_queue` agora captura esse erro e **reconcilia** via
+`set_queue_attributes`, então re-rodar é seguro.
+
+### Rodando as provas
+
+```sh
+export WALLET_TEST_KEYCLOAK=http://localhost:8080 WALLET_TEST_SQS_ENDPOINT=http://localhost:4566
+go test -tags=integration ./test/integration/ -run 'TestKeycloak|TestSQS.*Polic|TestSQSRedrive|TestSQSResource' -v
+```
+
+Detalhes completos: [`deploy/keycloak/README.md`](deploy/keycloak/README.md) e
+[`deploy/localstack/README.md`](deploy/localstack/README.md).
 
 ---
 

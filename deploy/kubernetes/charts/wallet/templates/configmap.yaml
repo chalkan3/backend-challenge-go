@@ -34,6 +34,10 @@ data:
   # auth.issuer é a URL completa do realm (…/realms/wallet), usada como está.
   WALLET_AUTH_ISSUER: {{ .Values.auth.issuer | trimSuffix "/" | quote }}
   WALLET_AUTH_JWKS_URL: {{ printf "http://%s:8080/realms/%s/protocol/openid-connect/certs" (include "wallet.keycloakHost" .) .Values.keycloak.realm | quote }}
+  # Audience policy: the realm embedded in this chart mints aud=wallet-api (via
+  # the wallet:audience client scope). Requiring it here means a token minted
+  # for another audience in the same realm is refused. Must match the realm file.
+  WALLET_AUTH_AUDIENCE: {{ .Values.auth.audience | quote }}
 
   # ---- SQS ------------------------------------------------------------------
   WALLET_SQS_REQUEST_QUEUE: {{ .Values.sqs.external.requestQueue | quote }}

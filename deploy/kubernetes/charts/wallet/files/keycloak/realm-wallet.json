@@ -3,6 +3,51 @@
   "enabled": true,
   "sslRequired": "none",
   "accessTokenLifespan": 900,
+  "revokeRefreshToken": true,
+  "refreshTokenMaxReuse": 0,
+  "bruteForceProtected": true,
+  "permanentLockout": false,
+  "failureFactor": 10,
+  "eventsEnabled": true,
+  "adminEventsEnabled": true,
+  "adminEventsDetailsEnabled": true,
+  "eventsListeners": ["jboss-logging"],
+
+  "clientScopes": [
+    {
+      "name": "wallet:provider",
+      "description": "Machine identity of a game provider. Grants wager submission and read of its own transactions.",
+      "protocol": "openid-connect",
+      "attributes": { "include.in.token.scope": "true", "display.on.consent.screen": "false" }
+    },
+    {
+      "name": "wallet:internal",
+      "description": "Internal wallet service identity: the only scope allowed to open wallets and read the ledger.",
+      "protocol": "openid-connect",
+      "attributes": { "include.in.token.scope": "true", "display.on.consent.screen": "false" }
+    },
+    {
+      "name": "wallet:audience",
+      "description": "Injects the wallet API audience (aud=wallet-api) into access tokens, so a token minted for another audience in this realm is refused by the service.",
+      "protocol": "openid-connect",
+      "attributes": { "include.in.token.scope": "true", "display.on.consent.screen": "false" },
+      "protocolMappers": [
+        {
+          "name": "wallet-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "wallet-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "lightweight.claim": "false"
+          }
+        }
+      ]
+    }
+  ],
+
   "clients": [
     {
       "clientId": "provider-a",
@@ -14,6 +59,9 @@
       "serviceAccountsEnabled": true,
       "standardFlowEnabled": false,
       "directAccessGrantsEnabled": false,
+      "fullScopeAllowed": false,
+      "defaultClientScopes": ["wallet:provider", "wallet:audience"],
+      "optionalClientScopes": [],
       "protocolMappers": [
         {
           "name": "provider-id",
@@ -41,6 +89,9 @@
       "serviceAccountsEnabled": true,
       "standardFlowEnabled": false,
       "directAccessGrantsEnabled": false,
+      "fullScopeAllowed": false,
+      "defaultClientScopes": ["wallet:provider", "wallet:audience"],
+      "optionalClientScopes": [],
       "protocolMappers": [
         {
           "name": "provider-id",
@@ -68,6 +119,9 @@
       "serviceAccountsEnabled": true,
       "standardFlowEnabled": false,
       "directAccessGrantsEnabled": false,
+      "fullScopeAllowed": false,
+      "defaultClientScopes": ["wallet:internal", "wallet:audience"],
+      "optionalClientScopes": [],
       "protocolMappers": [
         {
           "name": "internal-role",

@@ -7,6 +7,15 @@
 //     "providerId"; they may only touch their own transactions;
 //   - the internal client (wallet-internal) carries claim "wallet:internal"
 //     and is the only identity allowed to operate wallets.
+//
+// The scope claim is captured too. It is deliberately NOT a gate for
+// authentication or authorization: the identity claims above are signed and
+// already un-forgeable, so requiring a scope would add a failure mode without
+// adding security. The token is *minted with a minimal scope* (see
+// deploy/keycloak/realm-wallet.json) and the scope is exposed here for two
+// concrete reasons: it lands in structured logs (a token carrying "email" on
+// a machine identity is a misconfiguration worth seeing) and integration tests
+// assert the narrowing actually happened.
 package auth
 
 import (
@@ -14,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -26,12 +36,24 @@ import (
 
 // Principal is the authenticated identity.
 type Principal struct {
-	ClientID   string // OAuth2 client (azp claim)
-	ProviderID string // provider this client is bound to (custom claim)
-	Internal   bool   // wallet:internal claim — internal service identity
+	ClientID   string   // OAuth2 client (azp claim)
+	ProviderID string   // provider this client is bound to (custom claim)
+	Internal   bool     // wallet:internal claim — internal service identity
+	Scopes     []string // scope claim, split; informational, never a gate (see package doc)
 }
 
 func (p Principal) IsProvider() bool { return p.ProviderID != "" }
+
+// HasScope reports whether the token carries the given scope. It exists for
+// observability and tests; authorization itself is claim-based on purpose.
+func (p Principal) HasScope(scope string) bool {
+	for _, s := range p.Scopes {
+		if s == scope {
+			return true
+		}
+	}
+	return false
+}
 
 // Authenticator validates tokens against the IdP JWKS and keeps the key set
 // fresh, so key rotation is transparent.
@@ -189,10 +211,25 @@ func (a *Authenticator) Validate(rawToken string) (Principal, error) {
 	providerID, _ := providerClaim.(string)
 	internalClaim, _ := tok.Get("wallet:internal")
 	internal, _ := internalClaim.(bool)
+	scopeClaim, _ := tok.Get("scope")
+	scope, _ := scopeClaim.(string)
 
-	p := Principal{ClientID: clientID, ProviderID: providerID, Internal: internal}
+	p := Principal{ClientID: clientID, ProviderID: providerID, Internal: internal, Scopes: splitScopes(scope)}
 	if !p.Internal && !p.IsProvider() {
 		return Principal{}, fmt.Errorf("%w: token carries neither providerId nor internal role", ErrInvalidToken)
 	}
 	return p, nil
+}
+
+// splitScopes turns the space-separated OAuth2 scope claim into a slice,
+// dropping empty fields so a blank claim yields a nil slice rather than [""].
+func splitScopes(scope string) []string {
+	if scope == "" {
+		return nil
+	}
+	fields := strings.Fields(scope)
+	if len(fields) == 0 {
+		return nil
+	}
+	return fields
 }
