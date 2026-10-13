@@ -45,6 +45,9 @@ transactional outbox, inbox durável e controle de concorrência por carteira.
 - [Integração contínua](#-integração-contínua)
 - [Verificação com race detector (réplicas)](#-verificação-com-race-detector-réplicas)
 - [Reconciliação contínua](#-reconciliação-contínua)
+- [Banco: pooling e auditoria](#-banco-pooling-e-auditoria)
+  - [PgBouncer — pool de conexões](#pgbouncer--pool-de-conexões)
+  - [pgAudit — auditoria no servidor](#pgaudit--auditoria-no-servidor)
 - [Simulações de falha](#-simulações-de-falha)
 - [Decisões técnicas](#-decisões-técnicas)
   - [Partidas dobradas (diferencial opcional)](#partidas-dobradas-diferencial-opcional)
@@ -198,6 +201,8 @@ sequenceDiagram
 | **Composição** | Uber Fx (`fx.Module`, `fx.Provide`, `fx.Invoke`, `fx.Lifecycle`) |
 | **Transport** | go-kit (`kit/endpoint` + `kit/transport/http` + `kit/metrics`) sobre `net/http` |
 | **Persistência** | PostgreSQL 17 com `pgx/v5` e SQL explícito |
+| **Pooling** | PgBouncer em `pool_mode = transaction` (profile `pooled`) |
+| **Auditoria no banco** | pgAudit (`pgaudit.log = 'write,ddl,role'`) na imagem `deploy/pgaudit` (profile `audit`) |
 | **Mensageria** | AWS SQS (FIFO) via LocalStack |
 | **IdP** | Keycloak (OAuth2/OIDC, `client_credentials`) |
 | **Migrations** | goose embarcadas no binário (`go:embed`) |
@@ -234,6 +239,8 @@ deploy/
   observability/        # otel-collector, prometheus, tempo, loki + provisioning Grafana
   keycloak/             # realm-wallet.json (import automático)
   localstack/           # init: criação das filas FIFO
+  pgbouncer/            # pooler: pgbouncer.ini (transaction mode) + userlist
+  pgaudit/              # Dockerfile (Postgres 17 + extensão) + pgaudit.conf
 ```
 
 ---
@@ -270,6 +277,8 @@ make up            # equivale a `docker compose up --build -d`
 | 📬 LocalStack | http://localhost:4566 | SQS FIFO |
 | 🐘 PostgreSQL | localhost:5433 | `wallet`/`wallet` |
 | 📊 Grafana | http://localhost:3000 | só com `--profile observability` |
+| 🔀 **PgBouncer** | localhost:6433 | só com `--profile pooled` (app em `:8086`) |
+| 🛡️ **Postgres + pgAudit** | localhost:5434 | só com `--profile audit` |
 
 Com `--profile split` (a mesma imagem em dois papéis):
 
@@ -478,6 +487,11 @@ Todas documentadas em [`.env.example`](.env.example). As principais:
 | `WALLET_REFERENCE_TTL` / `WALLET_REFERENCE_MAX_ATTEMPTS` | Política de referências pendentes |
 | `WALLET_RECONCILE_INTERVAL` / `WALLET_RECONCILE_BATCH` | Cadência e tamanho do lote da varredura de reconciliação (padrão `5m` / `100`) |
 | `WALLET_OTEL_ENABLED` | Liga o tracing (padrão `false`) |
+| `WALLET_DB_MAX_CONNS` | Teto de conexões do pool **por processo** (padrão `20`) — dimensionar contra `max_connections` do Postgres, ou deixar o PgBouncer absorver |
+
+> **PgBouncer e pgAudit** não são variáveis do app: eles mudam o *caminho até o
+> banco*, não a configuração do serviço. São profiles do compose (`pooled`,
+> `audit`) — ver [Banco: pooling e auditoria](#-banco-pooling-e-auditoria).
 
 ### Migrations
 
@@ -967,6 +981,131 @@ worker contra o **banco real**, planta a divergência com um `UPDATE` na tabela
 `wallets` (o ledger fica intacto — o trigger append-only proíbe editá-lo), e
 verifica tanto a detecção quanto o controle positivo: reparado o saldo, a mesma
 carteira reconcilia limpa.
+
+---
+
+## 🗄️ Banco: pooling e auditoria
+
+Duas peças que vivem **fora** do binário — e por isso mesmo provam coisas que o
+código sozinho não prova. Ambas sob profiles do compose: o ambiente do dia a dia
+(`docker compose up`) continua falando direto com o Postgres, sem pooler e sem
+extensão.
+
+| Peça | Profile | O que muda | O que prova |
+| :-- | :-- | :-- | :-- |
+| **PgBouncer** | `pooled` | acesso ao banco via `pgbouncer:6432` | N clientes colapsam em M conexões reais |
+| **pgAudit** | `audit` | `postgres-audit` com a extensão carregada | todo WRITE/DDL deixa rastro no servidor |
+
+```sh
+make up-pooled                             # app :8086 via pooler
+make up-audit                              # postgres :5434 com pgAudit
+```
+
+### PgBouncer — pool de conexões
+
+O Postgres aceita `max_connections = 100`. Sem pooler, cada processo abre até
+`WALLET_DB_MAX_CONNS` conexões **permanentes**: três réplicas `multi` (3 × 20)
+mais o par `split` (15 + 5) chegam perto do teto antes de qualquer pico. Com o
+PgBouncer em `pool_mode = transaction`, todas as conexões de cliente compartilham
+`default_pool_size` (10) conexões reais no servidor.
+
+**O detalhe que quase todo mundo erra.** `transaction` mode devolve a conexão de
+servidor ao pool no fim da transação — não no fim da sessão. Isso quebra prepared
+statements nomeados de drivers ingênuos (`ERROR: prepared statement
+"stmtcache_…" already exists`), porque a conexão troca de dono entre execuções.
+O `session` mode seria a saída "segura" e é justamente por isso que não serve:
+uma conexão fica amarrada ao cliente a sessão inteira e o pooler vira um proxy
+caro sem multiplexação. `statement` mode proíbe transações multi-statement — e o
+wallet usa `WithinTx` para gravar saldo + ledger + inbox/outbox atomicamente,
+então também não dá.
+
+O **pgx v5 detecta o PgBouncer no handshake** e cai para o protocolo simples
+sozinho, re-parseando cada statement. Nada no código do wallet precisou mudar — e
+isto não é uma afirmação de fé:
+
+```
+$ WALLET_TEST_DB_DSN=postgres://wallet:wallet@localhost:6433/wallet?sslmode=disable \
+    go test -tags=integration ./test/integration/ -count=1
+ok      github.com/chalkan3/backend-challenge-go/test/integration     36.994s
+```
+
+A suíte de integração **completa** — 40+ sessões concorrentes, transações
+`WithinTx`, idempotência sob corrida — passa idêntica pelo pooler. O dia em que
+um driver trocar por um sem essa detecção, `default_query_exec_mode=simple_protocol`
+no DSN resolve; o README registra o porquê para o próximo leitor não achar que
+foi sorte.
+
+**Observabilidade do pool.** `SHOW POOLS` e `SHOW STATS` expõem o multiplexing
+(`admin_users`/`stats_users` são obrigatórios, senão o comando nega com
+`FATAL: not allowed`):
+
+```
+$ psql "postgres://wallet:wallet@localhost:6433/pgbouncer" -c 'SHOW POOLS'
+ database |   user    | cl_active | sv_idle |  pool_mode
+----------+-----------+-----------+---------+-------------
+ wallet   | wallet    |         2 |       2 | transaction
+
+$ psql "postgres://wallet:wallet@localhost:6433/pgbouncer" -c 'SHOW STATS'
+ database | total_server_assignment_count | total_xact_count | total_query_count
+----------+-------------------------------+------------------+-------------------
+ wallet   |                           130 |              130 |               178
+```
+
+`cl_active` (conexões de cliente) contra `sv_idle`/`total_server_assignment_count`
+(conexões de servidor) é a leitura direta do ganho: 2 clientes, 2 backends, com
+130 atribuições de servidor — a conexão sendo **reaproveitada**, não reaberta.
+
+### pgAudit — auditoria no servidor
+
+O ledger é append-only por três mecanismos que vivem **dentro** da aplicação: a
+ausência de `UPDATE`/`DELETE` nos repositórios, os triggers `ledger_no_update`/
+`ledger_no_delete` na tabela, e as auditorias do `invariants.sql`. Todos são
+afirmações sobre *este binário*. Nenhum responde "quem tentou mexer no ledger com
+um `psql` aberto?".
+
+O pgAudit responde. Com `pgaudit.log = 'write, ddl, role'`, todo statement que
+escreve gera uma linha imutável no log do **servidor**, com usuário, database,
+statement e relação afetada. Isto foi verificado plantando os dois crimes:
+
+```
+$ docker compose --profile audit up -d
+$ psql "postgres://wallet:wallet@localhost:5434/wallet" \
+    -c 'UPDATE wallet_ledger_entries SET amount_minor = 999999;'
+UPDATE 0                          # ← o trigger BARROU a mutação
+$ psql "postgres://wallet:wallet@localhost:5434/wallet" \
+    -c 'DELETE FROM wallet_ledger_entries;'
+DELETE 0                          # ← idem
+
+$ docker compose --profile audit logs postgres-audit | grep 'AUDIT.*WRITE'
+… LOG:  AUDIT: SESSION,1,1,WRITE,UPDATE,TABLE,public.wallet_ledger_entries,UPDATE wallet_ledger_entries SET amount_minor = 999999,<not logged>
+… LOG:  AUDIT: SESSION,1,1,WRITE,DELETE,TABLE,public.wallet_ledger_entries,DELETE FROM wallet_ledger_entries,<not logged>
+```
+
+O ponto não é que o trigger falhou — ele **funcionou** (`UPDATE 0`). O ponto é
+que a **tentativa** ficou registrada. Defesa em profundidade: o trigger impede a
+mutação, o pgAudit grava quem tentou, quando e contra qual tabela.
+
+`pgaudit.log_relation = on` é o que faz a linha ser legível: sem ele, o log
+mostraria o SQL mas não a tabela de forma estruturada — e um `UPDATE` em
+`wallets` e um em `wallet_ledger_entries` seriam indistinguíveis fora do texto do
+statement. `pgaudit.log = 'read'` fica **desligado** de propósito: o serviço faz
+um volume enorme de `SELECT` (leitura de saldo, listagem do ledger) e auditar
+leitura inundaria o log. O que interessa para a integridade é *escrita*.
+
+Duas metades, e ambas precisam existir:
+
+1. **O `.so` carregado no boot** — `shared_preload_libraries = 'pgaudit'` (a
+   extensão registra hooks do executor; não dá para habilitar a quente). Isto
+   mora na imagem: `deploy/pgaudit/Dockerfile`, base Debian com
+   `apt install postgresql-17-pgaudit` (o PGDG publica o binário que casa com o
+   major 17). O `postgres:17-alpine` do dia a dia **não** traz o pgAudit — nem o
+   `.so` nem o control file, verificado.
+2. **A extensão no catálogo** — `CREATE EXTENSION pgaudit`, na migration
+   `00005_pgaudit.sql`. Ela é **condicional** (`IF EXISTS … pg_available_extensions`):
+   num banco sem a extensão disponível (Alpine, CI, suíte de integração) a
+   migration vira no-op e a subida segue. Auditoria é um *reforço* da
+   integridade, não um pré-requisito de boot — a migration aplica em ambos os
+   bancos, com e sem a extensão.
 
 ---
 

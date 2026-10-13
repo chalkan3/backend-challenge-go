@@ -1,4 +1,4 @@
-.PHONY: build fmt vet test test-race test-integration e2e up up-multi up-split down logs migrate-up migrate-down migrate-status kind-check kind-up kind-image kind-deploy kind-split kind-down kind-argocd kind-argocd-seed kind-status helm-lint engine-check preflight load-smoke load load-hot load-idempotency load-mixed load-distributed load-soak load-verify race-image race-replicas
+.PHONY: build fmt vet test test-race test-integration e2e up up-multi up-split up-pooled up-audit down logs migrate-up migrate-down migrate-status kind-check kind-up kind-image kind-deploy kind-split kind-down kind-argocd kind-argocd-seed kind-status helm-lint engine-check preflight load-smoke load load-hot load-idempotency load-mixed load-distributed load-soak load-verify race-image race-replicas
 
 # Engine/compose detection lives in scripts/engine.sh (podman vs docker). We ask
 # it once per recipe via $(shell ...) so `make up`, `make logs`, ... use exactly
@@ -58,6 +58,16 @@ up-multi: preflight
 # queue. Scale each side on its own dimension: --scale workers=4.
 up-split: preflight
 	$(COMPOSE) --profile split up --build -d
+
+# Connection pooling: app talks to Postgres through PgBouncer (transaction mode).
+# api through the pooler on :8086; SHOW POOLS on localhost:6433.
+up-pooled: preflight
+	$(COMPOSE) --profile pooled up --build -d
+
+# Server-side audit: Postgres 17 + pgAudit on :5434. WRITE/DDL statements land
+# in the server log as AUDIT: lines; see the migration 00005_pgaudit.
+up-audit: preflight
+	$(COMPOSE) --profile audit up --build -d
 
 down:
 	$(COMPOSE) down -v

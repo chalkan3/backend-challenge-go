@@ -17,6 +17,96 @@ services:
       timeout: 3s
       retries: 20
 
+  # ---------------------------------------------------------------------------
+  # Postgres com pgAudit (profile "audit").
+  #
+  # Mesma imagem-base (Debian) + a extensão pgAudit compilada no build. O log
+  # do servidor passa a registrar todo WRITE/DDL como linha imutável
+  #   AUDIT: SESSION,3,1,WRITE,UPDATE,TABLE,public.wallet_ledger_entries,...
+  # — o que transforma "o ledger é append-only" de promessa do código em
+  # garantia do banco (ver migration 00005_pgaudit.sql).
+  #
+  # Volume próprio (pgauditdata) de propósito: subir este perfil NÃO deve
+  # tocar nos dados do profile normal. É um ambiente para *demonstrar* a
+  # auditoria, não uma troca do banco de desenvolvimento.
+  #
+  #   docker compose --profile audit up --build
+  #   psql "postgres://wallet:wallet@localhost:5434/wallet" \
+  #        -c 'UPDATE wallet_ledger_entries SET amount_minor = 0 WHERE false;'
+  #   docker compose --profile audit logs postgres-audit | grep AUDIT
+  #
+  # `shared_preload_libraries` precisa do binário com o pgAudit disponível —
+  # por isso a flag `-c` no command, e não uma diretiva alterável a quente.
+  # ---------------------------------------------------------------------------
+  postgres-audit:
+    build:
+      context: .
+      dockerfile: deploy/pgaudit/Dockerfile
+    image: wallet-postgres-audit:17
+    profiles: ["audit"]
+    environment:
+      POSTGRES_USER: wallet
+      POSTGRES_PASSWORD: wallet
+      POSTGRES_DB: wallet
+    # A configuração de auditoria vive em deploy/pgaudit/pgaudit.conf, incluído
+    # pelo postgresql.conf (ver Dockerfile). Nada de `-c` duplicando diretiva:
+    # uma fonte de verdade, versionada e diffável.
+    command: ["postgres"]
+    ports:
+      - "5434:5432"
+    volumes:
+      - pgauditdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wallet -d wallet"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # ---------------------------------------------------------------------------
+  # Pool de conexões (profile "pooled").
+  #
+  # O Postgres aceita 100 conexões. Sem pooler, cada réplica abre até
+  # WALLET_DB_MAX_CONNS conexões permanentes: 3 réplicas "multi" (3x20) mais o
+  # par "split" (15+5) chegam perto do teto antes de qualquer pico. Com o
+  # PgBouncer em `pool_mode = transaction`, todas as conexões de cliente
+  # compartilham `default_pool_size` (10) conexões reais no servidor.
+  #
+  # O DSN do app continua o mesmo do dia a dia; só o host muda (pgbouncer:6432
+  # em vez de postgres:5432) — o override está no serviço `app` do profile
+  # "pooled", logo abaixo.
+  #
+  #   docker compose --profile pooled up -d
+  #   psql "postgres://wallet:wallet@localhost:6433/wallet" -c 'SHOW POOLS'   # multiplexing
+  #
+  # Só faz sentido com um driver que suporte pooling em transaction mode; o
+  # pgx v5 do wallet suporta (detecta o PgBouncer e usa o protocolo simples).
+  # Ver deploy/pgbouncer/README.md.
+  # ---------------------------------------------------------------------------
+  pgbouncer:
+    # Image oficial, mas com o entrypoint trocado pelo binário: o entrypoint
+    # padrão *gera* a config a partir de envs PGBOUNCER_* e ignoraria o arquivo
+    # versionado. Rodando o binário direto, deploy/pgbouncer/pgbouncer.ini é a
+    # fonte de verdade — versionado, diffável, revisável.
+    image: pgbouncer/pgbouncer:latest
+    entrypoint: ["/opt/pgbouncer/pgbouncer"]
+    command: ["/etc/pgbouncer/pgbouncer.ini"]
+    profiles: ["pooled"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./deploy/pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro,Z
+      - ./deploy/pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro,Z
+    ports:
+      - "6433:6432"
+    healthcheck:
+      # pgbouncer/pgbouncer não traz psql (nem /dev/tcp: o shell é busybox).
+      # nc -z é o teste certo aqui: porta aceitando conexão TCP.
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 6432"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
   keycloak:
     image: quay.io/keycloak/keycloak:26.3
     command: ["start-dev", "--import-realm", "--http-enabled=true"]
@@ -144,6 +234,61 @@ services:
       WALLET_INSTANCE_ID: wallet-3
     ports:
       - "8083:8080"
+
+  # ---------------------------------------------------------------------------
+  # Pooled topology (profile "pooled"): the same image, connecting through the
+  # PgBouncer instead of straight to Postgres.
+  #
+  # Why a separate service instead of a DSN env var on `app`: the whole claim
+  # is "the service is unchanged, only the connection path differs". Keeping
+  # `app` byte-identical and providing a sibling that overrides exactly one
+  # line (WALLET_DB_DSN) makes that claim checkable — `diff` between the two
+  # blocks is the evidence.
+  #
+  #   docker compose --profile pooled up -d
+  #   curl localhost:8081/health/ready                 # app :8081 now pools
+  #   psql "postgres://wallet:wallet@localhost:6433/pgbouncer" -c 'SHOW POOLS'
+  #
+  # The app still runs 1 instance here; add `--scale app-pooled=N` to watch N
+  # client pools collapse into default_pool_size backends (SHOW POOLS:
+  # cl_active vs sv_active).
+  # ---------------------------------------------------------------------------
+  app-pooled:
+    build: .
+    profiles: ["pooled"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      pgbouncer:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+    environment:
+      WALLET_HTTP_ADDR: ":8080"
+      # The one line that differs from `app`.
+      WALLET_DB_DSN: postgres://wallet:wallet@pgbouncer:6432/wallet?sslmode=disable
+      WALLET_SQS_ENDPOINT: http://localstack:4566
+      WALLET_SQS_REGION: us-east-1
+      WALLET_SQS_ACCESS_KEY_ID: test
+      WALLET_SQS_SECRET_KEY: test
+      WALLET_AUTH_ISSUER: http://localhost:8080/realms/wallet
+      WALLET_AUTH_JWKS_URL: http://keycloak:8080/realms/wallet/protocol/openid-connect/certs
+      WALLET_WORKERS_ENABLED: "true"
+      WALLET_RECONCILE_INTERVAL: "${WALLET_RECONCILE_INTERVAL:-5m}"
+      WALLET_RECONCILE_BATCH: "${WALLET_RECONCILE_BATCH:-100}"
+      WALLET_LOG_LEVEL: info
+      WALLET_OTEL_ENABLED: "${WALLET_OTEL_ENABLED:-false}"
+      WALLET_OTEL_LOGS_ENABLED: "true"
+      WALLET_OTEL_ENDPOINT: otel-collector:4317
+      WALLET_OTEL_INSECURE: "true"
+      WALLET_OTEL_SERVICE_NAME: wallet
+      WALLET_ENV: local
+      WALLET_OTEL_SAMPLE_RATIO: "${WALLET_OTEL_SAMPLE_RATIO:-1.0}"
+      WALLET_INSTANCE_ID: wallet-pooled
+    ports:
+      - "8086:8080"
 
   # ---------------------------------------------------------------------------
   # Split topology (profile "split"): the same image running two roles.
@@ -308,6 +453,7 @@ services:
 
 volumes:
   pgdata:
+  pgauditdata:
   promdata:
   tempodata:
   lokidata:
