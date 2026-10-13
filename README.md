@@ -33,6 +33,7 @@ transactional outbox, inbox durável e controle de concorrência por carteira.
 - [Como uma aposta percorre o sistema](#-como-uma-aposta-percorre-o-sistema)
 - [Stack](#-stack)
 - [Estrutura do projeto](#-estrutura-do-projeto)
+- [📚 Documentação completa (PT/EN)](docs/README.md)
 - [Subindo o ambiente](#-subindo-o-ambiente)
   - [Um binário, três modos](#um-binário-três-modos-e-por-que-não-três-binários)
   - [Kubernetes local (kind)](#kubernetes-local-kind--a-segunda-forma-de-subir-o-ambiente)
@@ -241,6 +242,8 @@ loadtest/               # testes de carga em k6 + auditoria de integridade em SQ
   k6/scenarios/         # smoke, hot-wallet, idempotency, mixed, distributed, soak
   sql/invariants.sql    # invariantes contábeis, rodadas direto no Postgres
 scripts/e2e.sh          # runner: sobe a stack, espera health, roda a suíte, derruba
+docs/                   # documentação detalhada, em PT e EN, lida no próprio
+                        # GitHub (Markdown puro); porta em docs/README.md
 deploy/
   observability/        # otel-collector, prometheus, tempo, loki + provisioning Grafana
   keycloak/             # realm-wallet.json (import automático) + README das policies
