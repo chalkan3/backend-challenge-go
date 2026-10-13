@@ -115,3 +115,39 @@ func TestRehydrateWallet(t *testing.T) {
 		require.ErrorIs(t, err, domain.ErrZeroVersion)
 	})
 }
+
+// TestDebitRejections pins the two guards Debit applies before touching the
+// balance, distinct from Credit's: a movement in another currency and a
+// non-positive amount. Both must leave the wallet untouched — a partially
+// applied debit would be a money bug invisible in the happy path.
+func TestDebitRejections(t *testing.T) {
+	w, _ := openWallet(t, "50.00")
+
+	t.Run("debit currency mismatch is rejected", func(t *testing.T) {
+		mv, err := w.Debit(mustParse(t, "1.00", "USD"), baseTime)
+		require.ErrorIs(t, err, domain.ErrCurrencyMismatch)
+		assert.False(t, mv.HasChange)
+		assert.Equal(t, "50.00", w.Balance().String())
+	})
+
+	t.Run("zero debit is rejected", func(t *testing.T) {
+		mv, err := w.Debit(mustParse(t, "0.00", "BRL"), baseTime)
+		require.ErrorIs(t, err, domain.ErrInvalidAmount)
+		assert.False(t, mv.HasChange)
+		assert.Equal(t, "50.00", w.Balance().String())
+	})
+
+	t.Run("negative debit is rejected", func(t *testing.T) {
+		mv, err := w.Debit(mustParse(t, "-5.00", "BRL"), baseTime)
+		require.Error(t, err)
+		assert.False(t, mv.HasChange)
+		assert.Equal(t, "50.00", w.Balance().String())
+	})
+
+	t.Run("zero credit is rejected", func(t *testing.T) {
+		mv, err := w.Credit(mustParse(t, "0.00", "BRL"), baseTime)
+		require.ErrorIs(t, err, domain.ErrInvalidAmount)
+		assert.False(t, mv.HasChange)
+		assert.Equal(t, "50.00", w.Balance().String())
+	})
+}

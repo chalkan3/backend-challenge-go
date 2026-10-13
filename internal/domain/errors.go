@@ -53,6 +53,8 @@ var (
 	ErrInvalidTransaction  = &Error{Code: "INVALID_TRANSACTION", Message: "transaction payload is invalid"}
 	ErrMissingReference    = &Error{Code: "REFERENCE_REQUIRED", Message: "referenceExternalTransactionId is required for REFUND/ROLLBACK"}
 	ErrZeroVersion         = &Error{Code: "INVALID_WALLET_VERSION", Message: "wallet version must start at 1"}
+	ErrInvalidAccount      = &Error{Code: "INVALID_ACCOUNT", Message: "account is not a valid chart-of-accounts entry"}
+	ErrUnbalancedJournal   = &Error{Code: "UNBALANCED_JOURNAL", Message: "journal entry debits do not equal credits"}
 )
 
 // FailureCode classifies any error into a stable code. Non-domain errors map
