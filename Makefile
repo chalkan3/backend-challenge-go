@@ -1,4 +1,4 @@
-.PHONY: build fmt vet test test-race test-integration e2e up up-multi up-split up-pooled up-audit down logs migrate-up migrate-down migrate-status kind-check kind-up kind-image kind-deploy kind-split kind-down kind-argocd kind-argocd-seed kind-status helm-lint engine-check preflight load-smoke load load-hot load-idempotency load-mixed load-distributed load-soak load-verify race-image race-replicas
+.PHONY: build fmt vet test test-race test-integration e2e up up-multi up-split up-pooled up-audit down logs migrate-up migrate-down migrate-status kind-check kind-up kind-image kind-deploy kind-split kind-down kind-argocd kind-argocd-seed kind-status helm-lint engine-check preflight load-smoke load load-hot load-idempotency load-mixed load-distributed load-soak load-verify race-image race-replicas tofu-init tofu-plan tofu-apply tofu-destroy tofu-fmt
 
 # Engine/compose detection lives in scripts/engine.sh (podman vs docker). We ask
 # it once per recipe via $(shell ...) so `make up`, `make logs`, ... use exactly
@@ -208,3 +208,34 @@ race-image:
 
 race-replicas: race-image
 	REPLICAS=$(or $(REPLICAS),3) ./scripts/race-replicas.sh
+
+# ---------------------------------------------------------------------------
+# SQS infrastructure, as code (deploy/tofu).
+#
+# This is the DECLARATIVE twin of deploy/localstack/init/10-queues.py, not a
+# replacement: the boto script is what makes `make up` self-sufficient, and the
+# tofu module is what can carry the resource policy, the IAM split and the CMK
+# that LocalStack stores but does not enforce. The two are kept honest by
+# test/integration/tofu_sqs_sync_test.go, which runs in the fast suite.
+#
+# Tofu is NOT needed to run the stack. Only these four targets need it.
+# ---------------------------------------------------------------------------
+tofu-init:
+	cd deploy/tofu && tofu init -input=false
+
+# Reads the declaration against LocalStack and prints what would change. Safe:
+# it provisions nothing.
+tofu-plan: tofu-init
+	cd deploy/tofu && tofu plan -var-file=local.tfvars -no-color
+
+# Against LocalStack. The name_prefix keeps a probe run from colliding with the
+# queues the compose stack owns; omit it to manage the real names (watch out for
+# the import problem documented in deploy/tofu/README.md).
+tofu-apply: tofu-init
+	cd deploy/tofu && tofu apply -var-file=local.tfvars $(if $(PREFIX),-var name_prefix=$(PREFIX),) -auto-approve
+
+tofu-destroy: tofu-init
+	cd deploy/tofu && tofu destroy -var-file=local.tfvars $(if $(PREFIX),-var name_prefix=$(PREFIX),) -auto-approve
+
+tofu-fmt:
+	cd deploy/tofu && tofu fmt -check -diff

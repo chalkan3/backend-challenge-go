@@ -91,6 +91,29 @@ script passa a ser seguro de re-rodar e *reconcilia* uma fila existente.
 
 ---
 
+## Valores que estavam implícitos, e agora são decisões
+
+Escrever o módulo [`../tofu`](../tofu/) ao lado deste script expôs três valores
+que ninguém tinha escolhido — os dois primeiros neste arquivo.
+
+**`MaximumMessageSize` não era declarado.** O script herdava o default do
+servidor. Uma das três filas, num volume antigo do LocalStack, estava com **256
+KiB** enquanto as outras duas tinham 1 MiB. Recriar do zero com os mesmos
+atributos dá 1 MiB, ou seja, o valor dependia da idade do volume — o que torna o
+caso pior, não melhor. O script agora declara `MAX_MESSAGE_SIZE = "1048576"`.
+Importa porque `internal/transport/http/codecs.go` lê corpos de até `1<<20`:
+uma fila de 256 KiB recusaria uma mensagem que a API já validou.
+
+**`VisibilityTimeout` faltava em `integration-events.fifo`.** Rodava com o
+default de 30s do SQS enquanto as outras duas declaravam 60. Passou a declarar 60
+como as demais.
+
+**No provider Terraform/OpenTofu**, o default de `max_message_size` é 262144 e o
+`hashicorp/aws` v5 **rejeita** 1 MiB — o v6 aceita. É por isso que o módulo exige
+`~> 6.0`; ver [`../tofu/README.md`](../tofu/README.md).
+
+---
+
 ## Como isto é provado
 
 `test/integration/sqs_policy_test.go`, contra o broker **vivo**:
@@ -100,6 +123,7 @@ script passa a ser seguro de re-rodar e *reconcilia* uma fila existente.
 | `TestSQSPoliciesAreApplied` | Lê cada atributo de volta e confere `RedrivePolicy`, `VisibilityTimeout`, retenção, long polling e dedup |
 | `TestSQSRedrivePolicyIsEnforced` | **Comportamental**: publica, recebe além de `maxReceiveCount` e observa a mensagem **chegar na DLQ** — prova que a política *age*, não só que foi gravada |
 | `TestSQSResourcePolicyIsAcceptedButNotEnforced` | Documenta o limite do LocalStack e falhará quando ele mudar |
+| `TestTofuSQSMatchesLocalstackInit` | Compara este script com `deploy/tofu` por fila: os valores e a ligação às variáveis |
 
 Rodar:
 

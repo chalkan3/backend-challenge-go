@@ -14,6 +14,15 @@ coverage.html
 # Artefato de build da imagem kind (contém a tag do SHA local)
 /.kind-image
 
+# OpenTofu/Terraform: o STATE nunca entra (contém valores resolvidos, incluindo
+# ARNs e policies), mas o LOCK entra — ele é o que garante o mesmo build do
+# provider em toda máquina e no CI. Ver deploy/tofu/README.md.
+deploy/tofu/.terraform/
+deploy/tofu/*.tfstate
+deploy/tofu/*.tfstate.*
+deploy/tofu/*.tfplan
+deploy/tofu/crash.log
+
 # Artefatos de ferramentas de agente/editor — não fazem parte do projeto
 octopus-skills/
 .idea/

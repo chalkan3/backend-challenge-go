@@ -48,6 +48,15 @@ All three:
     and latency. 20 is the maximum AWS accepts.
   * SqsManagedSseEnabled=true (default) → at-rest encryption with an
     AWS-managed key; explicit rather than implied.
+  * MaximumMessageSize=1 MiB → the SQS default, but pinned because it is not
+    merely a default here. internal/transport/http/codecs.go reads request
+    bodies up to 1<<20, so a request the API accepts can be a full 1 MiB; a
+    smaller queue would reject messages the service had already validated.
+    Left implicit, this value would sit at the mercy of a server default — and
+    one queue on a long-lived LocalStack volume was measured at 256 KiB, which
+    is exactly the failure mode that motivates pinning it. See also
+    deploy/tofu/variables.tf, where the provider's own default is wrong (it
+    provisions 256 KiB) and the value had to be pinned there too.
 """
 import json
 import os
@@ -69,6 +78,10 @@ sqs = boto3.client(
 LONG_POLL = "20"
 # 14 days is the SQS maximum — used where a message is evidence worth keeping.
 MAX_RETENTION = "1209600"
+# The SQS default, pinned explicitly: the API accepts 1 MiB request bodies (see
+# internal/transport/http/codecs.go), so a queue smaller than this can reject a
+# message the service already validated.
+MAX_MESSAGE_SIZE = "1048576"
 
 
 def arn_of(url: str) -> str:
@@ -106,6 +119,7 @@ dlq = ensure_queue(
         "MessageRetentionPeriod": MAX_RETENTION,
         "ReceiveMessageWaitTimeSeconds": LONG_POLL,
         "SqsManagedSseEnabled": "true",
+        "MaximumMessageSize": MAX_MESSAGE_SIZE,
     },
 )
 
@@ -118,6 +132,7 @@ ensure_queue(
         "MessageRetentionPeriod": "345600",  # 4 days
         "ReceiveMessageWaitTimeSeconds": LONG_POLL,
         "SqsManagedSseEnabled": "true",
+        "MaximumMessageSize": MAX_MESSAGE_SIZE,
         "RedrivePolicy": json.dumps(
             {"deadLetterTargetArn": arn_of(dlq), "maxReceiveCount": 5}
         ),
@@ -132,8 +147,14 @@ ensure_queue(
         # is by event identity, never by a hash of the payload.
         "ContentBasedDeduplication": "false",
         "MessageRetentionPeriod": MAX_RETENTION,  # financial events
+        # Explicit like the other two queues: an omitted VisibilityTimeout would
+        # silently take the SQS default of 30s, which is a value nobody chose.
+        # (Was omitted until deploy/tofu refused to agree on a number — the sync
+        # test caught it. See test/integration/tofu_sqs_sync_test.go.)
+        "VisibilityTimeout": "60",
         "ReceiveMessageWaitTimeSeconds": LONG_POLL,
         "SqsManagedSseEnabled": "true",
+        "MaximumMessageSize": MAX_MESSAGE_SIZE,
     },
 )
 

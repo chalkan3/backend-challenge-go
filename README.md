@@ -50,7 +50,8 @@ transactional outbox, inbox durável e controle de concorrência por carteira.
   - [pgAudit — auditoria no servidor](#pgaudit--auditoria-no-servidor)
 - [Políticas: Keycloak e SQS](#-políticas-keycloak-e-sqs)
   - [Keycloak — identidade e audience](#keycloak--identidade-e-audience)
-  - [SQS — políticas de fila](#sqs--políticas-de-fila)itoria-no-servidor)
+  - [SQS — políticas de fila](#sqs--políticas-de-fila)
+  - [As filas como código: `deploy/tofu`](#as-filas-como-código-deploytofu)
 - [Simulações de falha](#-simulações-de-falha)
 - [Decisões técnicas](#-decisões-técnicas)
   - [Partidas dobradas (diferencial opcional)](#partidas-dobradas-diferencial-opcional)
@@ -73,6 +74,7 @@ nunca seja contado duas vezes nem perdido**.
 | 🔒 **Concorrência** | Lock row-level por carteira + `version` otimista; carteiras distintas progridem em paralelo |
 | 🧮 **Precisão monetária** | `Money` é um value object em unidades menores (`int64`), nunca `float` |
 | 🛡️ **Identidade mínima** | Token de máquina com escopo enxuto e `aud` exigida; filas com redrive e long polling provados |
+| ⚙️ **Infra declarativa** | As mesmas filas em `deploy/tofu` para o alvo que as aplica de verdade (resource policy, IAM, CMK), com teste contra divergência |
 
 ---
 
@@ -243,6 +245,8 @@ deploy/
   observability/        # otel-collector, prometheus, tempo, loki + provisioning Grafana
   keycloak/             # realm-wallet.json (import automático) + README das policies
   localstack/           # init: filas FIFO + README das políticas de fila
+  tofu/                 # as mesmas filas como infraestrutura (resource policy, IAM,
+                        # CMK), no alvo que pode ser AWS + README das armadilhas
   pgbouncer/            # pooler: pgbouncer.ini (transaction mode) + userlist
   pgaudit/              # Dockerfile (Postgres 17 + extensão) + pgaudit.conf
 ```
@@ -1201,6 +1205,44 @@ go test -tags=integration ./test/integration/ -run 'TestKeycloak|TestSQS.*Polic|
 
 Detalhes completos: [`deploy/keycloak/README.md`](deploy/keycloak/README.md) e
 [`deploy/localstack/README.md`](deploy/localstack/README.md).
+
+### As filas como código: `deploy/tofu`
+
+O `10-queues.py` é o que faz `make up` ser auto-suficiente — sem toolchain na
+máquina. O que ele **não pode** fazer é a parte que não existe localmente: a
+resource policy, o IAM por serviço e a CMK, que o LocalStack armazena e **não**
+aplica. [`deploy/tofu/`](deploy/tofu/) é a mesma declaração num alvo que pode
+ser AWS, e o teste `tofu_sqs_sync_test.go` (sem build tag) lê os dois arquivos e
+impede que divirjam — o mesmo tratamento que o realm e o init já recebem.
+
+```sh
+make tofu-plan    # lê contra o LocalStack, não provisiona
+make tofu-apply PREFIX=probe-   # conjunto paralelo, sem colidir com o compose
+```
+
+> [!IMPORTANT]
+> **O tofu precisa do binário `tofu` na máquina; o resto do projeto não.** Nada
+> do que existe hoje depende dele: `make up`, os testes e o `e2e` continuam
+> rodando pelo script boto. Adotar o módulo é uma escolha, não uma obrigação
+> nova — e o `state` é a peça que o boto não tinha.
+
+Três coisas que **só apareceram ao rodar contra um servidor**, e que mudaram o
+código:
+
+| Achado | Consequência |
+| :-- | :-- |
+| `hashicorp/aws` v5 **rejeita** 1 MiB em `max_message_size` (range 1024–262144) | O módulo exige `~> 6.0`; o v6 aplica 1 MiB, o v5 teria provisionado 256 KiB |
+| O `10-queues.py` **não declarava** `MaximumMessageSize` | Uma fila num volume antigo estava com 256 KiB, as outras com 1 MiB — valor que ninguém escolheu. Agora é explícito (`MAX_MESSAGE_SIZE`) |
+| `integration-events.fifo` **não declarava** `VisibilityTimeout` | Rodava com o default de 30s enquanto as outras duas usavam 60 |
+
+O primeiro importa porque `internal/transport/http/codecs.go` lê corpos de até
+1 MiB: uma fila de 256 KiB recusaria mensagens que a API já tinha validado.
+
+Limite honesto: apontar o módulo para AWS real é uma **declaração, não uma
+medição** — não havia credenciais. O que foi provado, contra o LocalStack vivo,
+é que 7 recursos aplicam, que os atributos das três filas são **idênticos** aos
+do script boto (lidos com `get-queue-attributes`, não do state), e que o teste
+de sincronia não deixa os dois divergirem.
 
 ---
 
