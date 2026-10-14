@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.1](https://github.com/chalkan3/backend-challenge-go/compare/walletd-v0.2.0...walletd-v0.2.1) (2026-10-14)
+
+
+### Bug Fixes
+
+* **devx:** test-integration separa os dois bancos e docs param de mentir a contagem ([38b2b81](https://github.com/chalkan3/backend-challenge-go/commit/38b2b81f4782ca1a5bef4ef954051cb1c4c05ac0))
+* **test:** a marcação de outbox publicada é eventualmente consistente, não imediata ([ca0dd26](https://github.com/chalkan3/backend-challenge-go/commit/ca0dd26a98ab9d9353eb26589c7de96e46e6ba34))
+
 ## [0.2.0](https://github.com/chalkan3/backend-challenge-go/compare/walletd-v0.1.0...walletd-v0.2.0) (2026-10-14)
 
 
