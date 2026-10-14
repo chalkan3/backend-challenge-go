@@ -34,8 +34,29 @@ test-race:
 
 # Testes de integração: exige o ambiente do compose no ar (Postgres, Keycloak,
 # LocalStack com as filas provisionadas).
+#
+# São dois grupos com exigências diferentes:
+#
+#   1. ./test/integration/... — testa CRUZANDO as pontas: abre carteira PELA API
+#      e confere o resultado NO banco. Logo precisa do banco da própria stack
+#      (é onde a API escreve). Em troca, é limpo: roda e deixa as invariantes
+#      contábeis intactas.
+#
+#   2. ./internal/postgres/... e ./internal/transport/http/... — falam DIRETO
+#      com o banco (nunca pela API) e exercitam de propósito caminhos que
+#      deixam estado que as invariantes rejeitariam numa auditoria (ex.:
+#      UpdateBalance sem o lançamento correspondente). Como não cruzam a API,
+#      podem — e devem — rodar num banco PRÓPRIO e descartável, senão
+#      `make load-verify` (que audita o banco inteiro) acusaria o resíduo do
+#      teste como se fosse corrupção de saldo.
+#
+# Por isso o segundo grupo recebe WALLET_TEST_DB_DSN apontando para o banco
+# isolado provisionado por scripts/test-db.sh. Aponte WALLET_TEST_DB_DSN=...
+# no ambiente para reusar um banco externo (o provisionamento é pulado).
 test-integration:
 	go test -tags=integration ./test/integration/... -v -timeout 10m
+	WALLET_TEST_DB_DSN="$$(./scripts/test-db.sh)" \
+		go test -tags=integration ./internal/postgres/... ./internal/transport/http/... -v -timeout 10m
 
 # Validação end-to-end em um comando: sobe a stack, espera os healthchecks de
 # verdade, roda a suíte (incluindo os testes de jornada) e derruba tudo.

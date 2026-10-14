@@ -105,10 +105,34 @@ wait_healthy keycloak 240
 wait_healthy localstack 180
 for svc in "${APP_SERVICES[@]}"; do wait_healthy "$svc" 180; done
 
+# ── 2b. Provision an ISOLATED test database ───────────────────────────────
+# The suite has two halves with different database needs, and conflating them
+# is a real failure mode — so this runner keeps them apart exactly like the
+# Makefile's `test-integration` target does:
+#
+#   * ./test/integration/...  tests ACROSS the wire: it opens a wallet THROUGH
+#     THE API and checks the result IN the database. It must therefore use the
+#     STACK's database, because that is where the API writes. Pointing it at
+#     another database makes every "open a wallet, then read it back" assertion
+#     fail with an empty result (not a bug — a misconfiguration).
+#
+#   * ./internal/postgres/... and ./internal/transport/http/...  talk DIRECTLY
+#     to the database (never through the API) and deliberately persist state
+#     the accounting invariants would reject on an audit (e.g. UpdateBalance
+#     without the matching ledger row). They get their OWN throwaway database,
+#     migrated fresh by scripts/test-db.sh, so `make load-verify` — which audits
+#     the whole stack database — keeps being a signal about the SERVICE, not
+#     about test residue.
+#
+# scripts/test-db.sh honours WALLET_TEST_DB_DSN (skips provisioning when set),
+# so an externally managed CI database is still supported.
+STACK_DB_DSN="${WALLET_TEST_STACK_DB_DSN:-postgres://wallet:wallet@localhost:5433/wallet?sslmode=disable}"
+echo "==> provisioning isolated test database"
+TEST_DB_DSN="$(./scripts/test-db.sh)"
+
 # ── 3. Run the suite against the live stack ────────────────────────────────
 # Exported explicitly so `go test` never falls back to a surprising default.
 export WALLET_TEST_API_URL="${WALLET_TEST_API_URL:-$API_URL_DEFAULT}"
-export WALLET_TEST_DB_DSN="${WALLET_TEST_DB_DSN:-postgres://wallet:wallet@localhost:5433/wallet?sslmode=disable}"
 export WALLET_TEST_SQS_ENDPOINT="${WALLET_TEST_SQS_ENDPOINT:-http://localhost:4566}"
 export WALLET_TEST_KEYCLOAK="${WALLET_TEST_KEYCLOAK:-http://localhost:8080}"
 [ "${MULTI:-0}" = "1" ] && export WALLET_TEST_API_URL_2="${WALLET_TEST_API_URL_2:-http://localhost:8082}" || true
@@ -121,12 +145,27 @@ if [ "${UP_ONLY:-0}" = "1" ]; then
   exit 0
 fi
 
-if ! go test -race -count=1 -tags=integration -timeout 15m -v ./test/integration/... ./internal/postgres/... ./internal/transport/http/... "$@"; then
-  echo "" >&2
-  echo "==> suite FAILED — last 80 lines of the app log (for triage):" >&2
-  for svc in "${APP_SERVICES[@]}"; do
-    echo "--- $svc ---" >&2
-    $COMPOSE ${PROFILE_FLAGS[@]:-} logs --tail=80 "$svc" >&2 || true
-  done
-  exit 1
-fi
+# Cross-wire journeys: use the STACK database, because the API writes there.
+# NOTE: no WALLET_TEST_DB_DSN in scope here on purpose — that is the default
+# (postgres://…/wallet), and forcing the isolated DB would break every test
+# that opens a wallet via the API and reads it back.
+run_group() {
+  local label="$1" dsn="$2" pkg_csv="$3"
+  shift 3
+  echo "==> [$label] $pkg_csv $*"
+  # shellcheck disable=SC2086  # intentional word-splitting: pkg_csv is space-separated
+  if ! WALLET_TEST_DB_DSN="$dsn" go test -race -count=1 -tags=integration -timeout 15m -v $pkg_csv "$@"; then
+    echo "" >&2
+    echo "==> suite FAILED ($label) — last 80 lines of the app log (for triage):" >&2
+    for svc in "${APP_SERVICES[@]}"; do
+      echo "--- $svc ---" >&2
+      $COMPOSE ${PROFILE_FLAGS[@]:-} logs --tail=80 "$svc" >&2 || true
+    done
+    exit 1
+  fi
+}
+
+run_group "stack-db" "$STACK_DB_DSN" \
+  "./test/integration/..." "$@"
+run_group "isolated-db" "$TEST_DB_DSN" \
+  "./internal/postgres/... ./internal/transport/http/..." "$@"

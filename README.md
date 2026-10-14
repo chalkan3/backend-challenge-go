@@ -17,8 +17,8 @@ transactional outbox, inbox durável e controle de concorrência por carteira.
 
 [![CI](https://github.com/chalkan3/backend-challenge-go/actions/workflows/ci.yml/badge.svg)](https://github.com/chalkan3/backend-challenge-go/actions/workflows/ci.yml)
 [![Release](https://github.com/chalkan3/backend-challenge-go/actions/workflows/release.yml/badge.svg)](https://github.com/chalkan3/backend-challenge-go/actions/workflows/release.yml)
-[![Testes unitários](https://img.shields.io/badge/unit%20tests-427%20passing-2ea043)](#-testes)
-[![Testes de integração](https://img.shields.io/badge/integration%20tests-63%20passing-2ea043)](#-testes)
+[![Testes unitários](https://img.shields.io/badge/unit%20tests-778%20passing-2ea043)](#-testes)
+[![Testes de integração](https://img.shields.io/badge/integration%20tests-79%20passing-2ea043)](#-testes)
 [![Cobertura](https://img.shields.io/badge/coverage-90%25-2ea043)](#-testes)
 [![Go Report Card](https://goreportcard.com/badge/github.com/chalkan3/backend-challenge-go)](https://goreportcard.com/report/github.com/chalkan3/backend-challenge-go)
 
@@ -699,7 +699,7 @@ A identidade da mensagem é `sha256` do corpo. Eventos de saída são publicados
 ### Unitários
 
 ```sh
-go test ./...            # 427 testes (testify), table-driven
+go test ./...            # 778 testes (testify), table-driven
 go test -race ./...      # com detector de corrida
 go vet ./...             # + go vet -tags=integration ./...
 gofmt -l .               # vazio = formatado
@@ -733,7 +733,7 @@ docker compose up -d postgres keycloak localstack app   # dependências + app
 make test-integration                                   # go test -tags=integration ./test/integration/...
 ```
 
-Cobrem **63 testes de topo** (mais os subtests table-driven) distribuídos por
+Cobrem **64 testes de topo** (mais os subtests table-driven) distribuídos por
 `test/integration/`, `internal/postgres/`
 e `internal/transport/http/`: migrations e constraints (ledger append-only,
 unicidades, CHECKs), atomicidade financeira, cenário obrigatório de concorrência
