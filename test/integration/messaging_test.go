@@ -203,17 +203,27 @@ func TestOutboxPublishedOnlyAfterCommit(t *testing.T) {
 		t.Fatalf("events missing: processed=%v balanceChanged=%v", processed, balanceChanged)
 	}
 
-	// outbox rows for this aggregate are all published
+	// outbox rows for this aggregate are all published.
+	//
+	// Polled, not read once: the relay publishes to SQS and only THEN stamps
+	// `published_at` (relay.go: Publish, then MarkPublished). That order is the
+	// correct one — stamping first would lose the event if the publish failed —
+	// but it leaves a window where a message is already visible on the queue
+	// while its row still reads `published_at IS NULL`. Reading the queue above
+	// and asserting the DB immediately afterwards can therefore land inside that
+	// window. A single read made this flaky on a slower machine (the shared
+	// GitHub runner saw `unpublished outbox rows: 2` with the balance contract
+	// already satisfied), which is a false red, not lost money.
 	pool := mustDB(t)
-	var pending int
-	if err := pool.QueryRow(ctx, `
-		SELECT COUNT(*) FROM integration_outbox
-		WHERE aggregate_id = $1::uuid AND published_at IS NULL`, walletID).Scan(&pending); err != nil {
-		t.Fatal(err)
-	}
-	if pending != 0 {
-		t.Fatalf("unpublished outbox rows: %d", pending)
-	}
+	pollUntil(t, 15*time.Second, func() bool {
+		var pending int
+		if err := pool.QueryRow(ctx, `
+			SELECT COUNT(*) FROM integration_outbox
+			WHERE aggregate_id = $1::uuid AND published_at IS NULL`, walletID).Scan(&pending); err != nil {
+			t.Fatal(err)
+		}
+		return pending == 0
+	}, "outbox rows for the aggregate were never all marked published")
 }
 
 // TestOutboxEventIdStableOnReplay: republication of the same event keeps the
