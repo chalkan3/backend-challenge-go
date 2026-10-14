@@ -117,7 +117,7 @@ adding different currencies is an **error**, not a silent conversion.
 concrete repository.
 
 **Why:** the domain can only be tested without infrastructure if it **does not
-know** infrastructure. ~71 unit tests run without a stack because of that. And
+know** infrastructure. 399 top-level tests (778 subtests) run without a stack because of that. And
 swapping the infrastructure (LocalStack for AWS, Postgres for another store) does
 not touch the business rules.
 

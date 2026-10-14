@@ -37,8 +37,8 @@ make e2e
 
 ## A suíte rápida
 
-- **~71 testes unitários** distribuídos entre domínio, serviço, adapters e
-  platform, segundo o README.
+- **399 testes de topo** (778 subtests com os table-driven) distribuídos entre domínio, serviço, adapters e
+  platform.
 - Roda **sem stack**: nenhum Postgres, nenhuma fila, nenhum Keycloak.
 - Inclui o teste de **sincronia de infraestrutura** (`test/integration/tofu_sqs_sync_test.go`,
   sem build tag) que lê os dois arquivos declarativos e falha se divergirem —
@@ -82,6 +82,27 @@ Variáveis usadas pelos testes de integração:
 | `WALLET_TEST_DB_DSN` | `postgres://wallet:wallet@localhost:5433/wallet?sslmode=disable` |
 | `WALLET_TEST_KEYCLOAK` | `http://localhost:8080` |
 | `WALLET_TEST_SQS_ENDPOINT` | `http://localhost:4566` |
+
+> [!NOTE]
+> **Dois grupos, dois bancos — e por quê**
+>
+> `make test-integration` separa a suíte em dois grupos, porque eles têm
+> exigências diferentes de banco:
+>
+> 1. `./test/integration/...` testa **cruzando as pontas**: abre carteira
+>    *pela API* e confere o resultado *no banco*. Precisa do banco da própria
+>    stack (é onde a API escreve). Não force `WALLET_TEST_DB_DSN` para outro
+>    banco aqui — todo `abre-e-lê-de-volta` falharia com resultado vazio, o que
+>    é misconfiguração, não bug.
+> 2. `./internal/postgres/...` e `./internal/transport/http/...` falam
+>    **direto** com o banco e exercitam caminhos que deixam estado que as
+>    invariantes rejeitariam (ex.: `UpdateBalance` sem o lançamento). Por isso
+>    recebem `WALLET_TEST_DB_DSN` apontando para um banco **isolado e
+>    descartável**, provisionado por `scripts/test-db.sh`.
+>
+> Sem essa separação, rodar `make test-integration` deixa resíduo no banco da
+> stack e `make load-verify` acusa "stored balance equals ledger sum" etc. —
+> um **falso** vermelho, resíduo de teste lido como corrupção de saldo.
 
 > [!WARNING]
 > **Uma `API_URL` em `8081`, não `8080`**

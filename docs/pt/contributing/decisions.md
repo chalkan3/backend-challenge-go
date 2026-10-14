@@ -116,7 +116,7 @@ diferentes seja um **erro**, não uma conversão silenciosa.
 concreto.
 
 **Por quê:** o domínio só pode ser testado sem infraestrutura se ele **não
-conhecer** a infraestrutura. ~71 testes unitários rodam sem stack por causa
+conhecer** a infraestrutura. 399 testes de topo (778 subtests) rodam sem stack por causa
 disso. E trocar a infraestrutura (LocalStack por AWS, Postgres por outro store)
 não toca a regra de negócio.
 

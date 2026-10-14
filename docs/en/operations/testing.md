@@ -36,7 +36,7 @@ make e2e
 
 ## The fast suite
 
-- **~71 unit tests** spread across domain, service, adapters and platform,
+- **399 top-level tests** (778 subtests including the table-driven ones) spread across domain, service, adapters and platform,
   according to the README.
 - Runs **without a stack**: no Postgres, no queue, no Keycloak.
 - Includes the **infrastructure sync** test
@@ -81,6 +81,28 @@ Variables used by the integration tests:
 | `WALLET_TEST_DB_DSN` | `postgres://wallet:wallet@localhost:5433/wallet?sslmode=disable` |
 | `WALLET_TEST_KEYCLOAK` | `http://localhost:8080` |
 | `WALLET_TEST_SQS_ENDPOINT` | `http://localhost:4566` |
+
+> [!NOTE]
+> **Two groups, two databases — and why**
+>
+> `make test-integration` splits the suite into two groups, because they have
+> different database needs:
+>
+> 1. `./test/integration/...` tests **across the wire**: it opens a wallet
+>    *through the API* and checks the result *in the database*. It needs the
+>    stack's own database (that is where the API writes). Do not force
+>    `WALLET_TEST_DB_DSN` to another database here — every "open and read back"
+>    assertion would fail with an empty result, which is a misconfiguration,
+>    not a bug.
+> 2. `./internal/postgres/...` and `./internal/transport/http/...` talk
+>    **directly** to the database and exercise paths that persist state the
+>    invariants would reject (e.g. `UpdateBalance` without the matching ledger
+>    row). So they get `WALLET_TEST_DB_DSN` pointing at an **isolated,
+>    throwaway** database provisioned by `scripts/test-db.sh`.
+>
+> Without that split, running `make test-integration` leaves residue in the
+> stack database and `make load-verify` reports "stored balance equals ledger
+> sum" etc. — a **false** red, test residue read as balance corruption.
 
 > [!WARNING]
 > **An `API_URL` on `8081`, not `8080`**

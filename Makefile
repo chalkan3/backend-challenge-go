@@ -54,9 +54,19 @@ test-race:
 # isolado provisionado por scripts/test-db.sh. Aponte WALLET_TEST_DB_DSN=...
 # no ambiente para reusar um banco externo (o provisionamento é pulado).
 test-integration:
-	go test -tags=integration ./test/integration/... -v -timeout 10m
-	WALLET_TEST_DB_DSN="$$(./scripts/test-db.sh)" \
-		go test -tags=integration ./internal/postgres/... ./internal/transport/http/... -v -timeout 10m
+	# -count=1: integration tests talk to a LIVE stack (real Postgres, Keycloak,
+	# LocalStack). A cached "ok" for a test that depends on external state is
+	# worse than useless — it reports success without ever touching the stack.
+	go test -count=1 -tags=integration ./test/integration/... -v -timeout 10m
+	# Fail LOUDLY if the isolated DB cannot be provisioned. If `test-db.sh`
+	# errored, `$$(...)` expands to the empty string and go test would silently
+	# fall back to its default DSN — the stack's own database — reintroducing
+	# exactly the test-residue contamination this split exists to prevent, and
+	# turning `make load-verify` red for the wrong reason. Better to abort.
+	@dsn="$$(./scripts/test-db.sh)" || { echo "test-integration: scripts/test-db.sh failed (is the stack up?)" >&2; exit 1; }; \
+	[ -n "$$dsn" ] || { echo "test-integration: empty test DSN from scripts/test-db.sh" >&2; exit 1; }; \
+	WALLET_TEST_DB_DSN="$$dsn" \
+		go test -count=1 -tags=integration ./internal/postgres/... ./internal/transport/http/... -v -timeout 10m
 
 # Validação end-to-end em um comando: sobe a stack, espera os healthchecks de
 # verdade, roda a suíte (incluindo os testes de jornada) e derruba tudo.
