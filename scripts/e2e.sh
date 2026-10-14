@@ -46,11 +46,17 @@ fi
 
 cleanup() {
   if [ "${KEEP:-0}" = "1" ] || [ "${UP_ONLY:-0}" = "1" ]; then
-    echo "==> leaving the stack up (tear down with: $COMPOSE ${PROFILE_FLAGS[*]:-} down -v)"
+    echo "==> leaving the stack up (tear down with: $COMPOSE ${PROFILE_FLAGS[*]:-} down -v --remove-orphans)"
     return
   fi
   echo "==> tearing down"
-  $COMPOSE "${PROFILE_FLAGS[@]}" down -v >/dev/null 2>&1 || true
+  # `--profile multi|split` and `--remove-orphans` are not cosmetic: a plain
+  # `down -v` only tears down the services of the *currently selected* profiles.
+  # Run without MULTI/SPLIT after a `make up-multi`, and app-2/app-3 survive,
+  # pinning the pod and the wallet_default network so the next `up` cannot
+  # recreate the shared containers (name collision). Naming every profile and
+  # removing orphans makes teardown independent of how the stack was started.
+  $COMPOSE --profile multi --profile split "${PROFILE_FLAGS[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
 
@@ -141,7 +147,7 @@ echo "==> running integration suite (race detector on)"
 if [ "${UP_ONLY:-0}" = "1" ]; then
   # The stack is up and healthy; the caller (k6, a manual session) owns it now.
   echo "==> UP_ONLY=1: stack is ready, skipping the integration suite"
-  echo "    API:${API_URL_DEFAULT}  teardown: $COMPOSE ${PROFILE_FLAGS[*]:-} down -v"
+  echo "    API:${API_URL_DEFAULT}  teardown: $COMPOSE --profile multi --profile split ${PROFILE_FLAGS[*]:-} down -v --remove-orphans"
   exit 0
 fi
 

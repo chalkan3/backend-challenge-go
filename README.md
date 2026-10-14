@@ -35,12 +35,14 @@ transactional outbox, inbox durável e controle de concorrência por carteira.
 - [Estrutura do projeto](#-estrutura-do-projeto)
 - [📚 Documentação completa (PT/EN)](docs/README.md)
 - [Subindo o ambiente](#-subindo-o-ambiente)
+  - [Sem `make` — os comandos por baixo](#sem-make--os-comandos-por-baixo)
   - [Um binário, três modos](#um-binário-três-modos-e-por-que-não-três-binários)
   - [Kubernetes local (kind)](#kubernetes-local-kind--a-segunda-forma-de-subir-o-ambiente)
   - [Caminho GitOps (opcional): ArgoCD](#caminho-gitops-opcional-argocd)
 - [Observabilidade](#-observabilidade)
 - [API](#-api)
 - [Testes](#-testes)
+  - [Testes sem `make`](#testes-sem-make)
   - [Testes de integração (containers reais)](#testes-de-integração-containers-reais--sem-mock-de-infra)
   - [Testes de carga (k6)](#testes-de-carga-k6)
 - [Integração contínua](#-integração-contínua)
@@ -277,6 +279,97 @@ make up            # equivale a `docker compose up --build -d`
 > — tipicamente um cluster `kind`, que publica exatamente esses números — o
 > comando falha na hora com a causa, em vez de deixar os containers presos em
 > `Created`. Nesse caso rode `make kind-down` antes.
+
+
+### Sem `make` — os comandos por baixo
+
+O `make` é açúcar: cada alvo é uma linha de shell. Se você não tem `make`
+instalado, ou quer ver exatamente o que acontece (útil ao depurar), use os
+comandos crus abaixo. **Todas as seções deste README funcionam sem `make`.**
+
+**1. Escolha o seu engine.** `scripts/engine.sh` é a fonte de verdade da
+detecção — ele exporta `COMPOSE` (`podman-compose` ou `docker compose`) e
+`CONTAINER_ENGINE` (`podman` ou `docker`):
+
+```sh
+. ./scripts/engine.sh          # define $COMPOSE e $CONTAINER_ENGINE
+echo "$COMPOSE"                # ex.: podman-compose   (ou: docker compose)
+```
+
+> [!IMPORTANT]
+> `$COMPOSE` é um **prefixo de argv**, não um caminho: ele pode conter um
+> espaço (`"docker compose"`). Por isso expanda-o **sem aspas** —
+> `$COMPOSE up -d`, e nunca `"$COMPOSE" up -d`. A detecção é deliberadamente
+> conservadora: só trata `docker compose` como Docker quando um daemon Docker
+> de verdade responde (`docker info`), porque em hosts onde o CLI `docker` é um
+> shim do podman o `docker compose version` imprime o banner do podman-compose e
+> ainda sai com código 0.
+
+**2. Suba a stack.** O `make up` roda o pre-flight de portas antes; sem `make`,
+rode-o você mesmo (ou pule, já sabendo o risco):
+
+```sh
+PROFILES="" ./scripts/port-check.sh          # falha cedo se 8080/8081/4566 estão ocupadas
+$COMPOSE up --build -d                        # equivale a `make up`
+$COMPOSE logs -f app                          # segue os logs da app (make logs)
+$COMPOSE down -v                              # derruba e remove volumes (make down)
+```
+
+Para as outras topologias, o que muda é o `--profile`:
+
+```sh
+$COMPOSE --profile multi up --build -d        # make up-multi  → :8081 :8082 :8083
+$COMPOSE --profile split up --build -d        # make up-split  → api :8084 + workers :8085
+$COMPOSE --profile pooled up --build -d       # make up-pooled → PgBouncer :6433, app :8086
+$COMPOSE --profile audit  up --build -d       # make up-audit  → Postgres+pgAudit :5434
+```
+
+> [!WARNING]
+> **Derrube com os mesmos perfis com que subiu.** `$COMPOSE down -v` sem
+> `--profile multi` **não** remove `app-2`/`app-3`; eles seguram o pod e a rede,
+> e a próxima subida colide nos nomes dos containers. Ao trocar de topologia:
+> `$COMPOSE --profile multi --profile split down -v --remove-orphans`.
+>
+> Não precisa decorar: desde que este erro foi corrigido, o `cleanup` do
+> `scripts/e2e.sh` nomeia **todos** os perfis e passa `--remove-orphans`, então
+> `make e2e` depois de um `make up-multi` derruba tudo que a execução anterior
+> tiver deixado de pé.
+
+**3. Espere ficar pronto.** Os alvos `up*` esperam os healthchecks; sem `make`,
+é este loop (idêntico ao de `scripts/e2e.sh`):
+
+```sh
+until [ "$(curl -s -o /dev/null -w '%{http_code}' localhost:8081/health/ready)" = 200 ]; do sleep 1; done
+curl -s localhost:8081/health/live    # {"status":"live"}
+curl -s localhost:8081/health/ready   # {"status":"ready"}
+```
+
+As migrations rodam **no start do container** (hook do Fx) — não há passo
+manual. Para inspecionar o estado, o DSN é
+`postgres://wallet:wallet@localhost:5433/wallet?sslmode=disable`.
+
+**O que cada alvo do `make` vira, sem `make`:**
+
+| `make` | Comando equivalente |
+| :-- | :-- |
+| `make engine-check` | `. ./scripts/engine.sh >/dev/null && echo "$COMPOSE"` |
+| `make build` | `go build ./...` |
+| `make test` | `go test ./...` |
+| `make test-race` | `go test -race ./...` |
+| `make test-integration` | duas invocações: `go test -count=1 -tags=integration ./test/integration/... -v -timeout 10m` e, com `WALLET_TEST_DB_DSN="$(scripts/test-db.sh)"`, `… ./internal/postgres/... ./internal/transport/http/...` |
+| `make up` / `down` / `logs` | `$COMPOSE up --build -d` · `$COMPOSE down -v` · `$COMPOSE logs -f app` |
+| `make migrate-up` | `go run ./cmd/walletd migrate up` |
+| `make migrate-down` / `migrate-status` | `go run ./cmd/walletd migrate down` · `... migrate status` |
+| `make e2e` | `./scripts/e2e.sh` (o script faz tudo: sobe, espera, testa, derruba) |
+| `make load-smoke` … `load-soak` | `VUS=48 ITER_PER_VU=7 ./scripts/load-run.sh hot` (cenários: `smoke`/`hot`/`idempotency`/`mixed`/`distributed`/`soak`; `all` roda todos) |
+| `make load-verify` | `./scripts/load-verify.sh` |
+
+> [!TIP]
+> Os alvos `make test-integration` e `make e2e` são os únicos que exigem mais
+> que uma linha, porque cada um provisiona um banco isolado antes de rodar
+> (`scripts/test-db.sh`). Se você apontar a suíte para o banco da stack por
+> engano, a auditoria de integridade acusa "corrupção" que na verdade é resíduo
+> de teste — veja [Testes sem `make`](#testes-sem-make).
 
 
 ### Portas publicadas
@@ -709,6 +802,108 @@ Cobertura combinada (unit + integração, com a stack no ar): **91,1%** —
 `1979/2172` statements, medidas com `-coverpkg=./cmd/...,./internal/...` sobre os
 dois conjuntos de pacotes. Os badges de teste acima saem destas duas contagens.
 
+### Testes sem `make`
+
+Todo alvo de teste é um comando de shell. Nenhum deles **precisa** de `make`.
+
+**Unitários — não precisam de stack nem de containers:**
+
+```sh
+go test ./...                          # make test
+go test -race ./...                    # make test-race
+go test -run TestName -v ./internal/service/...
+go test -cover ./...                   # cobertura por pacote
+go vet ./... && go vet -tags=integration ./...   # o vet cobre os dois build tags
+gofmt -l .                             # vazio = formatado
+```
+
+**Integração — precisa da stack no ar, e são _duas_ invocações.** Este é o único
+passo com uma pegadinha real, então leia antes de copiar. Os dois grupos de
+pacotes precisam de bancos **diferentes**:
+
+```sh
+$COMPOSE up -d postgres keycloak localstack app   # a stack precisa estar de pé
+
+# grupo 1 — atravessa o fio (abre carteira PELA API, lê no banco da API):
+#   sem WALLET_TEST_DB_DSN → usa o banco da stack, que é onde a API escreve
+go test -count=1 -tags=integration ./test/integration/... -v -timeout 10m
+
+# grupo 2 — fala DIRETO com o banco e deixa resíduo de propósito:
+#   provisiona o banco isolado e aponta a suíte para ele
+dsn="$(scripts/test-db.sh)" || { echo "test-db.sh falhou (a stack está no ar?)" >&2; exit 1; }
+[ -n "$dsn" ] || { echo "DSN vazio de test-db.sh" >&2; exit 1; }
+WALLET_TEST_DB_DSN="$dsn" \
+  go test -count=1 -tags=integration ./internal/postgres/... ./internal/transport/http/... -v -timeout 10m
+```
+
+O `-count=1` é deliberado: um `ok` em cache para um teste que depende de estado
+externo é pior que inútil — ele reporta sucesso sem nunca tocar a stack. O
+`-timeout 10m` cobre o cenário de concorrência.
+
+> [!WARNING]
+> **Por que os dois grupos não podem compartilhar o banco.** A suíte é dividida
+> em dois grupos com necessidades opostas:
+> - `./test/integration/...` atravessa o fio: abre carteira **pela API** e lê o
+>   resultado no banco onde a API escreve — logo, *precisa* do banco da stack.
+> - `./internal/postgres/...` e `./internal/transport/http/...` falam **direto**
+>   com o banco e deixam, de propósito, estado que as invariantes contábeis
+>   rejeitariam (saldo alterado sem lançamento, carteira sem abertura). Eles
+>   **precisam** de um banco descartável.
+>
+> Rodar os dois grupos no mesmo banco faz `make load-verify` falhar em 5 de 12
+> auditorias — um **falso vermelho**: o que ele lê é resíduo de teste, não
+> corrupção. `scripts/test-db.sh` existe exatamente para isso, e o DSN vazio
+> **aborta** em vez de cair silenciosamente no banco da stack.
+
+**Um pacote só** (útil ao depurar; trocar o `./...` pelo caminho):
+
+```sh
+WALLET_TEST_DB_DSN="$(scripts/test-db.sh)" go test -tags=integration -v -run TestReplay ./test/integration/...
+```
+
+**End-to-end, sem `make`** — o script faz o ciclo completo (sobe, espera os
+healthchecks de verdade, testa, derruba mesmo em falha):
+
+```sh
+./scripts/e2e.sh                    # make e2e
+MULTI=1 ./scripts/e2e.sh            # make e2e MULTI=1
+SPLIT=1 ./scripts/e2e.sh            # make e2e SPLIT=1
+KEEP=1  ./scripts/e2e.sh            # deixa a stack de pé no fim
+./scripts/e2e.sh -run Journey       # flags extras vão para o `go test`
+```
+
+**Integridade dos dados** — direto no Postgres, sem serviço no meio:
+
+```sh
+./scripts/load-verify.sh            # make load-verify
+# ou, sem o wrapper, o SQL puro contra a stack:
+podman exec -i wallet_postgres_1 psql -U wallet -d wallet < loadtest/sql/invariants.sql
+```
+
+Sai `0` somente se todas as 12 auditorias reportarem `0` violações.
+
+**Carga (k6) — sem `make`.** O k6 não é instalado no host: roda da imagem
+oficial, então só precisa que a stack esteja no ar. Note que a latência é lida
+de `__ENV` e os VUs/iterações são variáveis de ambiente:
+
+```sh
+./scripts/load-run.sh smoke                 # contrato inteiro, rápido
+VUS=48 ITER_PER_VU=7 ./scripts/load-run.sh hot      # make load-hot
+VUS=24 ITER_PER_VU=9 ./scripts/load-run.sh idempotency
+VUS=48 ITER_PER_VU=10 ./scripts/load-run.sh mixed
+DURATION=30m VUS=32 ./scripts/load-run.sh soak
+APIS=http://localhost:8081,http://localhost:8082,http://localhost:8083 \
+  VUS=96 ./scripts/load-run.sh distributed   # exige `make up-multi` antes
+./scripts/load-run.sh all                   # make load
+
+# Em CI/runner compartilhado, o envelope de latência é mais frouxo:
+WALLET_LATENCY_PROFILE=ci VUS=48 ./scripts/load-run.sh hot
+```
+
+Um cenário `smoke` verde não prova nada sozinho — ele prova que a API
+*responde*. Que o que foi *commitado* é consistente é o `load-verify` acima.
+É por isso que os dois são passos separados.
+
 ### ✅ Validação end-to-end (um comando)
 
 Para quem vai avaliar: **um comando** sobe a stack, espera os healthchecks de
@@ -798,7 +993,7 @@ make load                  # hot + idempotency + mixed
 make up-multi              # três réplicas
 make load-distributed      # lock entre processos
 
-make load-verify           # 9 auditorias de integridade, ~1M entradas
+make load-verify           # 12 auditorias de integridade, ~1M entradas
 ```
 
 > [!NOTE]
