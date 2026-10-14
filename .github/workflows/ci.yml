@@ -21,7 +21,15 @@ permissions:
   contents: read
 
 env:
-  GO_VERSION: "1.26"
+  # Pinned to a PATCH, not to "1.26". A floating minor lets setup-go resolve to
+  # whatever patch the runner has that day, and the Go toolchain instruments a
+  # DIFFERENT NUMBER of statements per patch — so the coverage denominator moves
+  # under the ratchet without a line of code changing. Measured on this repo:
+  # 1.26.0/1.26.2 count 2335 statements (90.0%), 1.26.9 counts 2380 (88.3%); the
+  # 45 extra are cmd/walletd statements that newer patches started instrumenting
+  # and that no unit test covers. A gate whose verdict depends on the calendar is
+  # not a gate. Bump deliberately, and re-derive COVERAGE_FLOOR when you do.
+  GO_VERSION: "1.26.9"
   # Compose project name, so the job can address containers deterministically.
   COMPOSE_PROJECT_NAME: wallet
 
@@ -72,15 +80,15 @@ jobs:
       - name: Coverage (ratchet toward 90%)
         # A two-sided gate, and the reasons matter:
         #
-        #  • The TARGET is 90% of the unit suite, and it is a real goal, not
-        #    decoration. The suite has now REACHED it (~90.0% measured), so the
-        #    floor is raised to match: 90% is blocking from here on.
+        #  • The TARGET is 90% of the unit suite. It is a real goal, not
+        #    decoration, but it is NOT currently reached on the pinned
+        #    toolchain: see the floor comment below. Progress toward it is
+        #    reported, not enforced.
         #
         #  • The FLOOR below is a ratchet: it only ever moves up. It fails the
         #    build the moment coverage drops, which is the property that
         #    actually matters — a number that can fall silently is worse than
-        #    no number. Raising the floor to the measured value is how the
-        #    target becomes binding instead of aspirational.
+        #    no number.
         #
         # Why the number is honest and reachable: internal/postgres is tested
         # against a fake of its own `querier` interface (the same seam the
@@ -91,12 +99,26 @@ jobs:
         # gate is on the unit suite only, and why the two together — not
         # either alone — are the claim.
         env:
-          # The goal, now reached: the floor below equals it, so the gate is
-          # hard. Keep the two equal unless a deliberate exception is intended.
+          # Aspirational. Progress is printed, and is deliberately not fatal
+          # while the suite closes the gap.
           COVERAGE_TARGET: "90"
-          # Ratchet floor: the current measured value, rounded down. Never
-          # lower this without saying why in the commit message.
-          COVERAGE_FLOOR: "90"
+          # Ratchet floor, derived from a measurement rather than chosen: on the
+          # pinned toolchain (GO_VERSION above, 1.26.9) the suite measures 88.3%
+          # over 2380 statements. It is NOT 90: the earlier floor of 90 was set
+          # from a 90.0% reading taken on go1.26.0, which instruments 45 FEWER
+          # statements (2335 vs 2380 — newer patches began instrumenting
+          # cmd/walletd), so the same code measured a higher percentage. Pinning
+          # the toolchain is what makes this number mean anything.
+          #
+          # 88, not 88.3, on purpose: one statement in internal/messaging
+          # (consumer.go:101, the context-cancelled receive path) is covered
+          # intermittently, so the total alternates between 88.2% and 88.3%.
+          # A floor sitting on the measured value would fail ~1 run in 6 for a
+          # timing accident. The floor is the stable value below the noise, so a
+          # failure here means a real regression.
+          #
+          # Never lower this without saying why in the commit message.
+          COVERAGE_FLOOR: "88"
         run: |
           go test -count=1 -covermode=atomic -coverprofile=coverage.out ./...
           total="$(go tool cover -func=coverage.out | tail -1 | awk '{print $NF}' | tr -d '%')"

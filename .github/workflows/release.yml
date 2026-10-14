@@ -24,7 +24,10 @@ permissions:
   packages: write   # push to GHCR
 
 env:
-  GO_VERSION: "1.26"
+  # Pinned to a patch for the same reason as ci.yml: the coverage denominator is
+  # a function of the toolchain, so a floating minor makes the gate's verdict
+  # depend on which patch the runner happens to have. See the comment there.
+  GO_VERSION: "1.26.9"
   REGISTRY: ghcr.io
   # Pinned, not floating: a release built by a different GoReleaser than the
   # one the config was validated against is a release whose config may not
