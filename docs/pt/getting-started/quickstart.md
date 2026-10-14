@@ -158,6 +158,14 @@ WALLET=$(curl -s -X POST $API/wallets \
 > Com a chave, repetir a abertura devolve a **mesma** carteira com
 > `"idempotentReplay": true`, sem duplicar o saldo de abertura. Sem chave, a
 > unicidade `(playerId, currency)` continua sendo a guarda.
+>
+> **A diferença aparece no retry.** Sem chave, reabrir a mesma carteira com a
+> mesma moeda devolve **`409 WALLET_ALREADY_EXISTS`** — o retry vira erro, e o
+> chamador não distingue "já abri isso" de "falhou". Com a chave, o retry é
+> **replay**: `201` (o mesmo status da abertura), mesmo `id`,
+> `"idempotentReplay": true` e o saldo **intacto** — a rota é `201 Created` nas
+> duas vezes, então não é o código que distingue, é o corpo. É esse o ganho, não
+> a duplicação: a unicidade sozinha já impede abrir duas carteiras.
 
 
 ## 6. Ver o saldo

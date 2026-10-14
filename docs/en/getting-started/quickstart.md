@@ -159,6 +159,15 @@ WALLET=$(curl -s -X POST $API/wallets \
 > With the key, repeating the opening returns the **same** wallet with
 > `"idempotentReplay": true`, without duplicating the opening balance.
 > Without a key, the `(playerId, currency)` uniqueness is still the guard.
+>
+> **The difference shows up on retry.** Without a key, re-opening the same
+> wallet in the same currency returns **`409 WALLET_ALREADY_EXISTS`** — the
+> retry becomes an error, and the caller cannot tell "I already opened this"
+> apart from "it failed". With the key, the retry is a **replay**: `201` (the
+> same status as the opening), same `id`, `"idempotentReplay": true` and the
+> balance **untouched** — the route is `201 Created` both times, so it is the
+> body, not the status code, that tells them apart. That is the gain — not
+> duplication, since uniqueness alone already prevents two wallets.
 
 
 ## 6. Read the balance
