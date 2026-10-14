@@ -38,7 +38,7 @@ jobs:
     name: release-please (PR de release · tag · release)
     runs-on: ubuntu-latest
     steps:
-      # Por que um GitHub App e não o GITHUB_TOKEN padrão:
+      # Por que não dá para usar o GITHUB_TOKEN padrão:
       #
       # Um push de tag feito com o GITHUB_TOKEN do Actions NÃO dispara outros
       # workflows — é o anti-loop do GitHub. O release.yml escuta exatamente
@@ -47,22 +47,37 @@ jobs:
       # release-please), e nenhum binário seria publicado. Uma falha que não
       # falha, que é a pior categoria.
       #
-      # Um token de App dispara os workflows normalmente. As duas variáveis
-      # abaixo são os secret NOMES de um App com permissão de Contents e
-      # Pull requests (write). Se o secret não existir, o passo cai para o
-      # GITHUB_TOKEN e emite um aviso alto — ver o passo seguinte.
-      - name: Escolher o token (App se configurado, senão GITHUB_TOKEN)
+      # As duas saídas suportadas, em ordem de preferência:
+      #
+      #   1. RELEASE_PLEASE_APP_ID + RELEASE_PLEASE_APP_PRIVATE_KEY — um GitHub
+      #      App. É o mais restrito (permissões por instalação, expira em 1h,
+      #      não pertence a uma pessoa) e o recomendado. NÃO é o caminho ativo
+      #      aqui: criar um App exige interação no navegador, e `gh` não expõe
+      #      essa API.
+      #   2. RELEASE_PLEASE_TOKEN — um PAT fine-grained. O caminho ativo aqui:
+      #      cria-se inteiramente por CLI, e um PAT fine-grained é escopado a
+      #      UM repositório, com validade, em vez do PAT clássico de escopo
+      #      amplo. Custa um secret de vida longa que precisa ser rotacionado —
+      #      é o preço de não ter um App.
+      #
+      # Se nenhum existir, cai para o GITHUB_TOKEN e emite um aviso alto — ver
+      # o passo seguinte.
+      - name: Escolher o token (App → PAT → GITHUB_TOKEN)
         id: token
         env:
           APP_ID: ${{ secrets.RELEASE_PLEASE_APP_ID }}
           APP_KEY: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+          PAT: ${{ secrets.RELEASE_PLEASE_TOKEN }}
         run: |
           if [ -n "${APP_ID}" ] && [ -n "${APP_KEY}" ]; then
             echo "using=app" >> "$GITHUB_OUTPUT"
             echo "A GitHub App is configured: the tag it pushes will trigger release.yml."
+          elif [ -n "${PAT}" ]; then
+            echo "using=pat" >> "$GITHUB_OUTPUT"
+            echo "A fine-grained PAT is configured: the tag it pushes will trigger release.yml."
           else
             echo "using=fallback" >> "$GITHUB_OUTPUT"
-            echo "::warning::RELEASE_PLEASE_APP_ID/PRIVATE_KEY are not set, so this falls back to GITHUB_TOKEN. The tag WILL be created, but the tag push will NOT trigger release.yml — no binaries will be published until a GitHub App token is configured. See docs/en/operations/release-process.md."
+            echo "::warning::Neither RELEASE_PLEASE_APP_ID/PRIVATE_KEY nor RELEASE_PLEASE_TOKEN are set, so this falls back to GITHUB_TOKEN. The tag WILL be created, but the tag push will NOT trigger release.yml — no binaries will be published until a token is configured. See docs/en/operations/release-process.md."
           fi
 
       - name: Gerar token do App
@@ -73,9 +88,14 @@ jobs:
           app-id: ${{ secrets.RELEASE_PLEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
 
+      # `steps.app-token.outputs.token` só existe quando o passo acima rodou; a
+      # expressão `||` encadeia App → PAT → GITHUB_TOKEN numa única linha, e
+      # `secrets.*` é resolvido pelo Actions no momento da interpolação. Assim o
+      # release-please recebe sempre exatamente um token, e o de maior
+      # precedência disponível.
       - name: release-please
         uses: googleapis/release-please-action@v4
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
-          token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          token: ${{ steps.app-token.outputs.token || secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}

@@ -73,7 +73,55 @@ tag aparece, a Release aparece (criada pelo próprio release-please), e
 **nenhum binário é publicado**. Nada fica vermelho. A falha é invisível até
 alguém tentar baixar um asset do release.
 
-A correção é um token de GitHub App, que dispara workflows normalmente:
+A correção é um token que **não** seja o `GITHUB_TOKEN`: um token de outra
+identidade está fora da regra anti-recursão, e o push de tag que ele faz dispara
+workflows normalmente. Há dois caminhos aceitos, com um trade-off explícito:
+
+| | GitHub App | PAT fine-grained |
+| :-- | :-- | :-- |
+| Secrets | `RELEASE_PLEASE_APP_ID` + `RELEASE_PLEASE_APP_PRIVATE_KEY` | `RELEASE_PLEASE_TOKEN` |
+| Identidade | o App, não uma pessoa | a pessoa que criou o PAT |
+| Permissões | por instalação, só as que o App pediu | escopadas a **um** repositório |
+| Validade | token de 1h, gerado a cada run | a validade do PAT (expira sozinho) |
+| Rotação | a chave privada, raramente | o PAT, antes de expirar |
+| Como criar | pelo navegador | por CLI (`gh api`) |
+
+**Um PAT fine-grained não é obrigado a ser um PAT clássico.** O clássico tem
+escopos amplos (`repo` cobrindo tudo que a conta enxerga); o fine-grained é
+escopado a *este* repositório, com as permissões mínimas e validade obrigatória.
+É o que o torna aceitável: o raio de dano de vazar o secret é um repositório, e
+ele expira sozinho. O que ele não tem é o melhor dos dois mundos — ainda é um
+secret de vida longa pertencente a uma pessoa, e é isso que um App resolve. Neste
+repositório o PAT é o caminho escolhido, porque criar um App exige interação no
+navegador e `gh` não expõe essa API; o App continua suportado pelo workflow e
+volta a ter precedência se for configurado.
+
+### Configurando o PAT fine-grained
+
+O PAT precisa de duas permissões de repositório, e de nada além disso:
+
+| Permissão | Nível | Por que |
+| :-- | :-- | :-- |
+| **Contents** | Read and write | criar a tag e a Release |
+| **Pull requests** | Read and write | abrir/atualizar o PR de release |
+
+```sh
+# 1. crie o PAT no navegador, no dono do repositório:
+#    https://github.com/settings/personal-access-tokens/new
+#    Repository access: Only select repositories → backend-challenge-go
+#    Permissions: Contents → Read and write · Pull requests → Read and write
+
+# 2. grave-o como secret (o valor é lido da stdin, não fica no histórico):
+gh secret set RELEASE_PLEASE_TOKEN --repo chalkan3/backend-challenge-go
+```
+
+Se `gh` estiver autenticado como outro usuário, passe `--repo` explicitamente em
+cada chamada — o alvo do secret não é inferido do diretório quando você usa
+`--repo`. Um PAT fine-grained **expira**: o secret não falha em silêncio quando
+isso acontece, e é justamente aí que este workflow é útil, porque ele emite o
+aviso descrito abaixo em vez de publicar uma tag órfã.
+
+### Configurando o GitHub App (alternativa)
 
 1. Crie um GitHub App com **Contents: read & write** e
    **Pull requests: read & write**.
@@ -81,17 +129,20 @@ A correção é um token de GitHub App, que dispara workflows normalmente:
 3. Adicione os secrets **`RELEASE_PLEASE_APP_ID`** e
    **`RELEASE_PLEASE_APP_PRIVATE_KEY`**.
 
-O `release-please.yml` detecta os dois secrets e gera um token com
-`actions/create-github-app-token`. Se eles não existirem, ele cai para o
-`GITHUB_TOKEN` **e emite um aviso alto** — não falha, porque um release só de
-tag e changelog ainda é útil. Mas o aviso é o sinal de que a metade binária do
-release não está rodando.
+### A precedência, e o aviso
+
+O `release-please.yml` resolve o token em ordem — **App → PAT →
+`GITHUB_TOKEN`** — e usa o primeiro que existir. Se os secrets do App estiverem
+presentes, ele gera um token com `actions/create-github-app-token` e ignora o
+PAT. Se nenhum dos dois existir, ele cai para o `GITHUB_TOKEN` **e emite um
+aviso alto** — não falha, porque um release só de tag e changelog ainda é útil.
+Mas o aviso é o sinal de que a metade binária do release não está rodando.
 
 > [!IMPORTANT]
-> Enquanto `RELEASE_PLEASE_APP_ID` e `RELEASE_PLEASE_APP_PRIVATE_KEY` não
-> existirem, o fluxo automatizado produz tags e changelogs, mas **nenhum
-> binário**. O caminho `workflow_dispatch` do `release.yml` não é afetado e
-> continua servindo para cortar um release na mão.
+> Enquanto nem `RELEASE_PLEASE_APP_ID`/`RELEASE_PLEASE_APP_PRIVATE_KEY` nem
+> `RELEASE_PLEASE_TOKEN` existirem, o fluxo automatizado produz tags e
+> changelogs, mas **nenhum binário**. O caminho `workflow_dispatch` do
+> `release.yml` não é afetado e continua servindo para cortar um release na mão.
 
 ## Os dois workflows não brigam pela Release
 
