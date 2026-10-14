@@ -40,6 +40,7 @@ k6_run() {
     -v "$PWD/loadtest/k6:/scripts:ro" \
     -w /scripts \
     -e API="$API" \
+    -e WALLET_LATENCY_PROFILE="${WALLET_LATENCY_PROFILE:-local}" \
     ${APIS:+-e APIS="$APIS"} \
     "$@" \
     "$K6_IMAGE" run "/scripts/scenarios/$script"

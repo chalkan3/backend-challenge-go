@@ -167,33 +167,46 @@ helm-lint:
 
 # Overrides: VUS=128, ITER_PER_VU=10, DURATION=30m, APIS=... — pass as make args,
 # they are forwarded into the k6 container as k6 -e environment variables.
+#
+# WALLET_LATENCY_PROFILE escolhe o envelope de latência (ver
+# loadtest/k6/lib/thresholds.js). `local` é o default: os números foram medidos
+# nesta máquina e o envelope é apertado o bastante para pegar uma regressão
+# enquanto se desenvolve. O CI opta por `ci` explicitamente — assim o
+# afrouxamento fica visível no diff, e não escondido no arquivo de thresholds.
+# `checks` e `http_req_failed` (correção) NÃO mudam com o perfil.
+WALLET_LATENCY_PROFILE ?= local
 api_load = ./scripts/load-run.sh
 
 load-smoke:
-	$(api_load) smoke
+	WALLET_LATENCY_PROFILE=$(WALLET_LATENCY_PROFILE) $(api_load) smoke
 
 load:
-	./scripts/load-run.sh all
+	WALLET_LATENCY_PROFILE=$(WALLET_LATENCY_PROFILE) ./scripts/load-run.sh all
 
 load-hot:
-	VUS=$(or $(VUS),48) ITER_PER_VU=$(or $(ITER_PER_VU),7) $(api_load) hot
+	WALLET_LATENCY_PROFILE=$(WALLET_LATENCY_PROFILE) \
+		VUS=$(or $(VUS),48) ITER_PER_VU=$(or $(ITER_PER_VU),7) $(api_load) hot
 
 load-idempotency:
-	VUS=$(or $(VUS),24) ITER_PER_VU=$(or $(ITER_PER_VU),9) $(api_load) idempotency
+	WALLET_LATENCY_PROFILE=$(WALLET_LATENCY_PROFILE) \
+		VUS=$(or $(VUS),24) ITER_PER_VU=$(or $(ITER_PER_VU),9) $(api_load) idempotency
 
 load-mixed:
-	VUS=$(or $(VUS),48) ITER_PER_VU=$(or $(ITER_PER_VU),10) $(api_load) mixed
+	WALLET_LATENCY_PROFILE=$(WALLET_LATENCY_PROFILE) \
+		VUS=$(or $(VUS),48) ITER_PER_VU=$(or $(ITER_PER_VU),10) $(api_load) mixed
 
 # make's $(or ...) splits on commas, so a multi-value default cannot live inside
 # it: override with `make load-distributed APIS=host:8081,host:8082`.
 APIS ?= http://localhost:8081,http://localhost:8082,http://localhost:8083
 
 load-distributed:
-	APIS="$(APIS)" VUS=$(or $(VUS),96) ITER_PER_VU=$(or $(ITER_PER_VU),6) \
+	WALLET_LATENCY_PROFILE=$(WALLET_LATENCY_PROFILE) \
+		APIS="$(APIS)" VUS=$(or $(VUS),96) ITER_PER_VU=$(or $(ITER_PER_VU),6) \
 		./scripts/load-run.sh distributed
 
 load-soak:
-	VUS=$(or $(VUS),16) DURATION=$(or $(DURATION),2m) $(api_load) soak
+	WALLET_LATENCY_PROFILE=$(WALLET_LATENCY_PROFILE) \
+		VUS=$(or $(VUS),16) DURATION=$(or $(DURATION),2m) $(api_load) soak
 
 load-verify:
 	./scripts/load-verify.sh

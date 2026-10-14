@@ -198,26 +198,67 @@ Sobrescritas de ambiente lidas por `k6/lib/config.js`: `API`, `APIS`, `KEYCLOAK`
 
 ## Calibração dos thresholds
 
-Um threshold que sempre passa é documentação, não teste. Os envelopes abaixo
-foram medidos nesta máquina (Podman, compose, uma instância combinada) e depois
-afrouxados em ~50% — uma regressão real dispara, a variância normal não.
+Um threshold que sempre passa é documentação, não teste. Mas um envelope só
+significa alguma coisa **em relação à máquina que produziu o número** — e esta
+seção ignorava isso, o que fazia o CI reprovar todo push.
 
-| Cenário | p50 | p95 | envelope |
+Os envelopes `local` foram medidos nesta máquina (Podman, compose, uma instância
+combinada) e depois afrouxados em ~50% — uma regressão real dispara, a variância
+normal não.
+
+| Cenário | p50 | p95 | envelope `local` |
 | :-- | --: | --: | :-- |
 | `hot-wallet` | 70ms | 76ms | `p95 < 200ms` |
 | `distributed` | 117ms | 310ms | `p95 < 600ms` |
 | `mixed` | 11ms | 32ms | `p95 < 100ms` |
 
-Os envelopes **não são o mesmo número, de propósito**. Os cenários quente e
-distribuído serializam todas as escritas em uma linha: a latência ali é fila, e
-cresce com o número de VUs. Medir isso contra o número do tráfego misto seria ou
-falha permanente, ou carimbo. O `mixed`, que espalha por carteiras independentes,
-é o que reflete a latência de produção em regime.
+### Por que existem dois perfis
+
+O mesmo cenário, medido no runner do GitHub, deu p95 de **297ms** contra os 76ms
+daqui — ~3,9x. Com o envelope de 200ms, o job `load` reprovava **todo** push, não
+por regressão do serviço, mas porque o envelope havia sido calibrado em outra
+máquina. Um vermelho que nenhuma mudança de código conserta ensina as pessoas a
+ignorarem vermelho.
+
+Então os dois tipos de threshold foram separados pelo que de fato afirmam:
+
+| | Muda com o ambiente? | O que reprova |
+| :-- | :-- | :-- |
+| **Correção** (`checks`, `http_req_failed`) | **Não** — absoluto e idêntico em toda máquina | um único 5xx, uma atualização perdida, um débito duplicado |
+| **Latência** (`wallet_money_latency`, `wallet_read_latency`) | **Sim** — é orçamento, e o orçamento depende da máquina | uma regressão além do envelope do perfil |
+
+O perfil é escolhido por `WALLET_LATENCY_PROFILE`, com default `local`:
+
+| Perfil | Onde | Envelope (hot-wallet) | Pega |
+| :-- | :-- | :-- | :-- |
+| `local` | `make load-hot` | `p95 < 200ms` | regressões pequenas, enquanto se desenvolve |
+| `ci` | job `load` do CI | `p95 < 2000ms` | regressões de ordem de grandeza |
+
+O default é `local` porque é a escolha conservadora: um envelope apertado falha
+alto, e uma falha falsa durante o desenvolvimento é barata de investigar. O CI
+**opta** por `ci` explicitamente no workflow, para o afrouxamento aparecer no
+diff em vez de ficar escondido no arquivo de thresholds.
+
+Um valor desconhecido em `WALLET_LATENCY_PROFILE` **falha imediatamente** em vez
+de cair num default: um typo não pode alargar o gate em silêncio.
+
+```sh
+make load-hot                                  # perfil local, apertado
+make load-hot WALLET_LATENCY_PROFILE=ci        # como o CI roda
+```
+
+### Overlap: o envelope é do shape, não da máquina
+
+Dentro de um perfil, os envelopes **não são o mesmo número, de propósito**. Os
+cenários quente e distribuído serializam todas as escritas em uma linha: a
+latência ali é fila, e cresce com o número de VUs. Medir isso contra o número do
+tráfego misto seria ou falha permanente, ou carimbo. O `mixed`, que espalha por
+carteiras independentes, é o que reflete a latência de produção em regime.
 
 O único threshold absoluto é `checks: rate==1` e `http_req_failed: rate==0`:
 correção não tem orçamento de erro. Um único 5xx, uma única atualização perdida
 ou um único débito duplicado reprovam o run, por mais rápida que a resposta tenha
-sido.
+sido — e isso vale nos dois perfis.
 
 ---
 

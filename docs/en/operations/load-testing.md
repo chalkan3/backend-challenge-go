@@ -151,6 +151,42 @@ WHERE w.balance <> l.total;
 | `make load-soak` | Sustained load (`DURATION=...`). |
 | `make load-verify` | Integrity audit in Postgres. |
 
+## Latency profiles: `local` and `ci`
+
+Latency envelopes depend on the machine that produced the number, so there are
+two profiles, chosen by `WALLET_LATENCY_PROFILE` (default `local`):
+
+| Profile | Envelope (`hot-wallet`) | Catches |
+| :-- | :-- | :-- |
+| `local` | `p95 < 200ms` | small regressions, while developing |
+| `ci` | `p95 < 2000ms` | order-of-magnitude regressions |
+
+The default is `local` because that is the conservative choice: a tight envelope
+fails loudly, and a false failure during development is cheap to investigate. CI
+opts into `ci` explicitly in the workflow, so the widening is visible in review.
+
+```sh
+make load-hot                              # local profile, tight
+make load-hot WALLET_LATENCY_PROFILE=ci    # how CI runs it
+```
+
+**What changes with the profile, and what does not.** Latency is a budget: the
+budget depends on the machine, so it moves. Correctness does **not** move —
+`checks: rate==1` and `http_req_failed: rate==0` are absolute in both profiles. A
+single 5xx, a single lost update or a single duplicated debit fails the run under
+either envelope, however fast the response was.
+
+An unknown value in `WALLET_LATENCY_PROFILE` **fails immediately** instead of
+falling back to a default: a typo must not silently widen the gate.
+
+> [!NOTE]
+> The `ci` profile exists because the same scenario measured a p95 of 297ms on a
+> GitHub runner against 76ms on the calibration machine (~3.9x). With the 200ms
+> envelope, the `load` job failed on every push — not because the service got
+> slower, but because the envelope was calibrated somewhere else. The wide
+> envelope is honest about what it can assert on a shared runner; the real proof
+> of correctness comes from `checks` and from `load-verify`.
+
 ## Reading the results
 
 | Symptom | Reading |

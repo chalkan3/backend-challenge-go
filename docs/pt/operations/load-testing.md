@@ -149,6 +149,42 @@ WHERE w.balance <> l.total;
 | `make load-soak` | Carga sustentada (`DURATION=...`). |
 | `make load-verify` | Auditoria de integridade no Postgres. |
 
+## Perfis de latência: `local` e `ci`
+
+Os envelopes de latência dependem da máquina que produziu o número, então há
+dois perfis, escolhidos por `WALLET_LATENCY_PROFILE` (default `local`):
+
+| Perfil | Envelope (`hot-wallet`) | Pega |
+| :-- | :-- | :-- |
+| `local` | `p95 < 200ms` | regressões pequenas, enquanto se desenvolve |
+| `ci` | `p95 < 2000ms` | regressões de ordem de grandeza |
+
+O default é `local` porque é a escolha conservadora: o envelope apertado falha
+alto, e uma falha falsa durante o desenvolvimento é barata de investigar. O CI
+opta por `ci` explicitamente no workflow, para o afrouxamento aparecer no diff.
+
+```sh
+make load-hot                              # perfil local, apertado
+make load-hot WALLET_LATENCY_PROFILE=ci    # como o CI roda
+```
+
+**O que muda com o perfil e o que não muda.** Latência é orçamento: o orçamento
+depende da máquina, então ele muda. Correção **não** muda — `checks: rate==1` e
+`http_req_failed: rate==0` são absolutos nos dois perfis. Um único 5xx, uma
+atualização perdida ou um débito duplicado reprovam o run em qualquer envelope,
+por mais rápida que a resposta tenha sido.
+
+Um valor desconhecido em `WALLET_LATENCY_PROFILE` **falha imediatamente** em vez
+de cair num default: um typo não pode alargar o gate em silêncio.
+
+> [!NOTE]
+> O perfil `ci` existe porque o mesmo cenário mediu p95 de 297ms no runner do
+> GitHub contra 76ms na máquina de calibração (~3,9x). Com o envelope de 200ms
+> o job `load` reprovava todo push — não por regressão do serviço, mas porque o
+> envelope foi calibrado em outra máquina. O envelope largo é honesto sobre o
+> que ele consegue afirmar num runner compartilhado; a prova de correção, que é
+> o que importa de fato, continua vindo dos `checks` e do `load-verify`.
+
 ## Interpretando os resultados
 
 | Sintoma | Leitura |
