@@ -1066,6 +1066,30 @@ docker run --rm --entrypoint walletd \
 > O job `binaries` roda `go test -race ./...` **antes** de publicar: uma tag não
 > pode publicar um binário que os testes nunca viram passar.
 
+> [!IMPORTANT]
+> **Antes de confiar em uma Release, dois interruptores precisam estar ligados.**
+> O terceiro workflow, `release-please.yml`, abre o PR de release a partir dos
+> Conventional Commits — mas depende de duas configurações que **não** vivem no
+> repositório, e cada uma falha de um jeito diferente:
+>
+> 1. **Actions pode abrir PRs.** Sem isso o workflow fica vermelho no último
+>    passo (`GitHub Actions is not permitted to create or approve pull
+>    requests`), depois de já ter feito todo o trabalho. Liga-se por CLI:
+>    `gh api --method PUT repos/<owner>/<repo>/actions/permissions/workflow -f
+>    default_workflow_permissions=read -F can_approve_pull_request_reviews=true`.
+> 2. **Um App ou PAT está configurado.** Sem isso a tag é criada com o
+>    `GITHUB_TOKEN`, que por regra anti-recursão **não dispara** o `release.yml`:
+>    a Release aparece com **`assets: []`** e nada fica vermelho. A falha é
+>    silenciosa e só dói na hora de baixar o binário.
+>
+> O `release-please` também **não** bumpa versão por commits `docs:` ou `chore:` —
+> só `feat:`/`fix:` entram no CHANGELOG. Isso é escolha declarada em
+> [`release-please-config.json`](release-please-config.json), onde
+> `docs`/`test`/`ci`/`chore` estão com `"hidden": true`: documentação e
+> infraestrutura de desenvolvimento mudam, mas não são versão. O passo a passo
+> completo, com o diagnóstico das duas falhas, está em
+> [Processo de release](docs/pt/operations/release-process.md).
+
 ### Rodando o que o CI roda, na sua máquina
 
 ```sh

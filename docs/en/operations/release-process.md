@@ -72,6 +72,24 @@ creates the tag with `GITHUB_TOKEN`, that push does **not** trigger
 itself), and **no binaries are ever published**. Nothing turns red. The failure
 is invisible until someone tries to download a release asset.
 
+**This trap has already been sprung in this repository**, and the trail is still
+in the history — it doubles as a ready-made diagnostic:
+
+```sh
+gh run list --workflow=release.yml
+#  success  push  v0.1.0          ← it did run: the tag was pushed by another identity
+
+gh release view walletd-v0.2.0 --json assets
+# {"assets":[]}                  ← the release exists, the binary does not
+```
+
+`v0.2.0` is the negative case: `release.yml` **never ran** for it (there is no
+matching run), whereas `v0.1.0` has a `success` run. The difference is not in the
+workflow or the code — it is in **who** pushed the tag. The comparison is worth
+more than the warning, because it is the real state a wrong configuration leaves
+behind: two Releases on the same page, one with assets, one without, and nothing
+in red to explain why.
+
 The fix is a token that is **not** `GITHUB_TOKEN`: a token belonging to another
 identity is outside the anti-recursion rule, and the tag push it makes triggers
 workflows normally. There are two accepted paths, with an explicit trade-off:
@@ -95,6 +113,50 @@ what an App solves. In this repository the PAT is the chosen path, because
 creating an App requires browser interaction and `gh` does not expose that API;
 the App remains supported by the workflow and takes precedence again if it is
 ever configured.
+
+### Prerequisite: letting Actions open PRs
+
+There is a second switch besides the token, and it fails **before** the first one
+— which is why it comes first when the workflow turns red:
+
+```
+##[error]release-please failed: GitHub Actions is not permitted to create or
+approve pull requests.
+```
+
+The symptom is misleading: the log shows release-please reading the commits,
+building the PR and updating the branch reference — **all the work done** — and
+only then dying on the `POST /pulls` call. Nothing in your project is wrong; the
+repository's default permission is what stops the `GITHUB_TOKEN` from creating
+PRs.
+
+**No browser needed.** The setting is exposed by the API, so it fits in one
+command:
+
+```sh
+gh api repos/chalkan3/backend-challenge-go/actions/permissions/workflow
+# {"default_workflow_permissions":"read","can_approve_pull_request_reviews":false}
+#                                                                        ^^^^^ the culprit
+
+gh api --method PUT repos/chalkan3/backend-challenge-go/actions/permissions/workflow \
+  -f default_workflow_permissions=read -F can_approve_pull_request_reviews=true
+```
+
+The `default_workflow_permissions=read` is deliberate and **should stay as it
+is**: `can_approve_pull_request_reviews` is what authorises the PR, and `read` as
+the default keeps every workflow without an explicit `permissions:` block unable
+to write to the repository. This repository declares what it needs, workflow by
+workflow (`contents: write` in release-please, `packages: write` in release),
+instead of asking for global write.
+
+> [!IMPORTANT]
+> **This switch and the token are independent problems, and both show up.**
+> Fixing the permission makes the PR open; it does **not** make the tag trigger
+> `release.yml`. Without an App or a PAT configured, the workflow falls back to
+> `GITHUB_TOKEN`, emits the loud warning at the end of the log and creates a tag
+> **with no binary published**. The symptom of that second failure is crueller,
+> because it does not turn red: it only shows up when someone tries to download
+> an asset from a Release that exists.
 
 ### Setting up the fine-grained PAT
 
