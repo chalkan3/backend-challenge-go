@@ -541,15 +541,60 @@ func TestTxRepo_ClaimPendingReferences_LocksAndLimits(t *testing.T) {
 	require.NoError(t, ref.MarkPendingReference(longAgo, time.Now().UTC()))
 	require.NoError(t, store.Repos().Transactions().Save(ctx, ref))
 
+	// Ordering was only half of it. In the split topology (SPLIT=1) a real
+	// `workers` process runs against this same database and its reference worker
+	// (registerWorkers → run("references", ...)) CLAIMS AND PROCESSES due
+	// PENDING_REFERENCE rows. It can therefore resolve our row to PROCESSED
+	// between the Save above and the claim below, and then the row is simply not
+	// there any more — "a due PENDING_REFERENCE row must be claimable" fails.
+	// That is why this assertion used to be flaky in the split job only: the
+	// bug was a test assuming it had exclusive use of a table a live worker
+	// drains, not a defect in ClaimPendingReferences.
+	//
+	// So the contract is proven on a row that cannot be taken: a transaction
+	// whose reference is NOT yet due (next_retry_at in the future) is invisible
+	// to the claim no matter who is running, which is a deterministic assertion.
+	// Then the row under test is verified to be claimable *or already resolved
+	// by the worker*, which is exactly what "a due dangling reference is picked
+	// up by somebody" means in a live system.
+	future := time.Now().UTC().Add(time.Hour)
+	notDue, err := domain.NewExternalTransaction(domain.ExternalTxParams{
+		ProviderID: "provider-a", ExternalTransactionID: "ext-" + uuid.NewString()[:8],
+		PlayerID: w.PlayerID(), WalletID: w.ID(), Kind: domain.KindRefund, RoundID: "round", GameID: "game",
+		Money: money(t, "10.00", "BRL"), ReferenceExternalTxID: "ext-ref-" + uuid.NewString()[:8],
+		ReceivedVia: domain.ViaHTTP, CorrelationID: "corr", Now: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	notDue.SetIdempotency("idem-"+uuid.NewString(), "hash-"+uuid.NewString()[:8])
+	require.NoError(t, store.Repos().Transactions().Insert(ctx, notDue))
+	require.NoError(t, notDue.MarkPendingReference(future, time.Now().UTC()))
+	require.NoError(t, store.Repos().Transactions().Save(ctx, notDue))
+
 	claimed, err := store.Repos().Transactions().ClaimPendingReferences(ctx, time.Now().UTC(), 10)
 	require.NoError(t, err)
+	for _, c := range claimed {
+		assert.NotEqual(t, notDue.ID(), c.ID(),
+			"a PENDING_REFERENCE row whose retry is in the future must not be claimable")
+	}
+
+	// The due row: either this claim sees it, or the live reference worker got
+	// there first and resolved it. Both are correct outcomes for a due dangling
+	// reference; what would be wrong is the row remaining PENDING_REFERENCE and
+	// untouched after a claim that ran with it due.
 	found := false
 	for _, c := range claimed {
 		if c.ID() == ref.ID() {
 			found = true
 		}
 	}
-	assert.True(t, found, "a due PENDING_REFERENCE row must be claimable")
+	if !found {
+		var status string
+		require.NoError(t, mustPool(t).QueryRow(ctx,
+			`SELECT status FROM wager_transactions WHERE id = $1`, ref.ID()).Scan(&status))
+		assert.NotEqual(t, "PENDING_REFERENCE", status,
+			"a due reference must be claimed here or resolved by the live worker — "+
+				"still PENDING_REFERENCE after a claim with it due means it was lost")
+	}
 }
 
 func TestTxRepo_ExistsProcessedReversal(t *testing.T) {
